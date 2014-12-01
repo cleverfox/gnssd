@@ -1,0 +1,12 @@
+{application, gnssd,
+ [
+  {description, "GNSS daemon"},
+  {vsn, "1.0"},
+  {id, "gnssd"},
+  {modules,      [gnssd,pgsql_worker]},
+  {registered,   []},
+  {applications, [kernel, stdlib, lager, bson, mongodb, inets]},
+  {mod, {gnssd, []}},
+  {env, [
+  ]} %%env
+]}. %%application
