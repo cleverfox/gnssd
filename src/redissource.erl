@@ -1,9 +1,9 @@
--module(redis2nginx).
+-module(redissource).
 
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/4]).
+-export([start_link/3]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -13,7 +13,7 @@
          terminate/2,
          code_change/3]).
 
--record(state, {redispid,url,chan,strip}).
+-record(state, {redispid,chan,imeicache}).
 
 %%%===================================================================
 %%% API functions
@@ -26,8 +26,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Host, Port, Chan, Url) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Host, Port, Chan, Url], []).
+start_link(Host, Port, Chan) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [Host, Port, Chan], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -44,17 +44,13 @@ start_link(Host, Port, Chan, Url) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Host, Port, {Chan, Strip}, Url]) ->
+init([Host, Port, Chan]) ->
 	{ok, Pid} = eredis_sub:start_link(Host, Port, ""),
 	lager:info("Eredis up ~p: ~p:~p",[Pid,Host,Port]),
 	eredis_sub:controlling_process(Pid),
-	eredis_sub:psubscribe(Pid, [Chan]),
+	eredis_sub:subscribe(Pid, [Chan]),
 	lager:info("Eredis up ~p subscribe ~p",[Pid,Chan]),
-	Url2=case is_binary(Url) of
-		     true -> Url;
-		     _ -> list_to_binary(Url)
-	     end,
-	{ok, #state{redispid=Pid,url=Url2,chan=Chan,strip=Strip}}.
+	{ok, #state{redispid=Pid,chan=Chan,imeicache=dict:new()}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -84,12 +80,6 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({push,Chan,Payload}, State) ->
-	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", Payload}, [], []),
-	lager:debug("Push ~p:~p ~p",[Url,RC,Body]),
-	{noreply, State};
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -103,16 +93,74 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({pmessage,_PSub,Chan,Payload,SrcPid}, State) ->
-	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", Payload}, [], []),
-	lager:debug("Push ~p:~p",[Url,RC,Body]),
+imei2deviceID(IMEI,Dict) ->
+	T=case dict:find(IMEI, Dict) of
+		{ok, {ID, Time}} ->
+			case timer:now_diff(now(),Time)<600000000 of
+				true -> 
+					{ok, ID};
+				false ->
+					error
+			end;
+		_ ->
+			error
+	end,
+	case T of 
+		{ok, MID} ->
+			{ok, MID, Dict};
+		error ->
+			case psql:equery("select id from devices where imei=$1",[IMEI]) of
+				{ok,_Hdr,[{Data}]} ->
+					D2=dict:store(IMEI,{Data,now()},Dict),
+					{ok, Data, D2};
+				_ -> {error, none, Dict}
+			end
+	end.
+
+handle_info({message,_Chan,Payload,SrcPid}, State) ->
+	eredis_sub:ack_message(SrcPid),
+	try mochijson2:decode(Payload) of
+		   {struct,List} when is_list(List) ->
+			DevID = case proplists:lookup(<<"imei">>,List) of
+					   {<<"imei">>, IMEIb} ->
+						   lager:info("Ok, imei is ~p",[IMEIb]),
+						   imei2deviceID(binary_to_list(IMEIb),State#state.imeicache);
+					   _none ->
+						   lager:info("There is no imei :("),
+						   {error, false, State}
+				   end, 
+			   lager:info("Ok, device ~p",[DevID]),
+			   case DevID of 
+				   {ok, ID, D2} -> 
+					   case global:whereis_name({device,ID}) of
+						   undefined -> 
+							   case supervisor:start_child(dev_sup,[ID]) of
+								   {ok,Pid} -> 
+									   gen_server:cast(Pid,{ds, List});
+								   Any -> 
+									   lager:error("Can't start device: ~p",[Any])
+							   end;
+						   Pid ->
+							   gen_server:cast(Pid,{ds, List})
+					   end,
+					   {noreply, State#state{imeicache=D2}};
+				   _ -> 
+					   {noreply, State}
+			   end;
+		   _Any -> 
+			   lager:error("Can't parse source ~p",[Payload]),
+			   {noreply, State}
+	   catch
+		   error:Err ->
+			   lager:error("Can't parse source ~p",[Err]),
+			   {noreply, State}
+	end;
+
+handle_info({subscribed,_Chan,SrcPid}, State) ->
 	eredis_sub:ack_message(SrcPid),
 	{noreply, State};
 
-
 handle_info(Info, State) ->
-	eredis_sub:ack_message(State#state.redispid),
 	lager:info("Info ~p",[Info]),
 	{noreply, State}.
 

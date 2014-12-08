@@ -6,7 +6,7 @@
 
 -export([start_link/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
-         code_change/3,equery/2,squery/1]).
+         code_change/3]).
 
 -record(state, {conn}).
 
@@ -49,14 +49,4 @@ terminate(_Reason, #state{conn=Conn}) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-equery(Sql, Args) ->
-	lager:info("aSQL: ~p, Args ~p",[Sql,Args]),
-	poolboy:transaction(postgres, fun(Worker) ->
-						      gen_server:call(Worker, {equery, Sql, Args}, 10000)
-				      end).
 
-squery(Sql) ->
-	lager:info("SQL: ~p",[Sql]),
-	poolboy:transaction(postgres, fun(Worker) ->
-						      gen_server:call(Worker, {squery, Sql}, 10000)
-				      end).

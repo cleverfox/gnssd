@@ -1,9 +1,9 @@
--module(redis2nginx).
+-module(device).
 
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/4]).
+-export([start_link/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -13,7 +13,13 @@
          terminate/2,
          code_change/3]).
 
--record(state, {redispid,url,chan,strip}).
+-record(state, {
+	  id,
+	  type,
+	  settings, 
+	  sub_position,
+	  sub_event
+	 }).
 
 %%%===================================================================
 %%% API functions
@@ -26,8 +32,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Host, Port, Chan, Url) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Host, Port, Chan, Url], []).
+start_link(ID) ->
+    gen_server:start_link({global, {device, ID}}, ?MODULE, [ID], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -44,17 +50,17 @@ start_link(Host, Port, Chan, Url) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Host, Port, {Chan, Strip}, Url]) ->
-	{ok, Pid} = eredis_sub:start_link(Host, Port, ""),
-	lager:info("Eredis up ~p: ~p:~p",[Pid,Host,Port]),
-	eredis_sub:controlling_process(Pid),
-	eredis_sub:psubscribe(Pid, [Chan]),
-	lager:info("Eredis up ~p subscribe ~p",[Pid,Chan]),
-	Url2=case is_binary(Url) of
-		     true -> Url;
-		     _ -> list_to_binary(Url)
-	     end,
-	{ok, #state{redispid=Pid,url=Url2,chan=Chan,strip=Strip}}.
+init([ID]) ->
+	lager:info("Staring ~p",[ID]),
+	case psql:equery("select type,settings from devices where id=$1",[ID]) of
+		{ok,_Hdr,[{Type,Settings}]} ->
+			{ok,PSub,TTL}=esub:device_get_sub("position",ID),
+			reload_after("position",TTL),
+			lager:info("Starting worker ~p ~p, sub ~p",[Type,Settings,PSub]),
+			{ok, #state{id=ID, type=Type,settings=Settings,sub_position=PSub}};
+		_ -> 
+			{error, cant_start}
+	end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -84,14 +90,58 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({push,Chan,Payload}, State) ->
-	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", Payload}, [], []),
-	lager:debug("Push ~p:~p ~p",[Url,RC,Body]),
+
+f2b(X) when is_integer(X) ->
+       	integer_to_binary(X);
+f2b(X) when is_float(X) -> 
+	float_to_binary(X,[{decimals, 20}, compact]).
+
+handle_cast({stop, Reason}, State) ->
+	{stop, Reason, State};
+
+handle_cast({ds, List}, State) ->
+	lager:info("Worker ~p got datasource ~p",[State#state.id,List]),
+	Notify=State#state.sub_position,
+	{_,[Lon, Lat]}=proplists:lookup(<<"position">>,List),
+	{_,Dir}=proplists:lookup(<<"dir">>,List),
+	{_,T}=proplists:lookup(<<"dt">>,List),
+	{_,Speed}=proplists:lookup(<<"sp">>,List),
+	Bi=integer_to_binary(State#state.id),
+	DevH= <<"device:lastpos:",Bi/binary>>,
+	Redis=fun(W) -> 
+			      eredis:q(W, [ "hmset", DevH, 
+					"lon", f2b(Lon),
+					"lat", f2b(Lat),
+					"dir", f2b(Dir),
+					"spd", f2b(Speed),
+				       	"t", T ])
+	      end,
+	poolboy:transaction(redis,Redis),
+	Data={struct,[
+		      {type,position},
+		      {dev,State#state.id},
+		      {dir,Dir},
+		      {spd,Speed},
+		      {pos,{array,[Lon, Lat]}}
+		     ]},
+	JSData=iolist_to_binary(mochijson2:encode(Data)),
+	lager:info("JS: ~p",[JSData]),
+	Fd=fun(E) ->
+			   gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
+	   end,
+	lists:foreach(Fd,Notify),
 	{noreply, State};
 
+handle_cast({sub, Type}, State) ->
+	{ok,PSub,TTL}=esub:device_get_sub("position",State#state.id),
+	reload_after("position",TTL),
+	lager:info("Worker ~p got notification ~p",[State#state.id,Type]),
+	{noreply, State#state{sub_position=PSub}};
+
+
 handle_cast(_Msg, State) ->
-    {noreply, State}.
+	lager:info("Worker ~p got cast ~p",[State#state.id,_Msg]),
+	{noreply, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -103,18 +153,8 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({pmessage,_PSub,Chan,Payload,SrcPid}, State) ->
-	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", Payload}, [], []),
-	lager:debug("Push ~p:~p",[Url,RC,Body]),
-	eredis_sub:ack_message(SrcPid),
-	{noreply, State};
-
-
-handle_info(Info, State) ->
-	eredis_sub:ack_message(State#state.redispid),
-	lager:info("Info ~p",[Info]),
-	{noreply, State}.
+handle_info(_Info, State) ->
+    {noreply, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -144,3 +184,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+reload_after(Database,TTL) ->
+	lager:info("Set ~p timer to ~p",[Database,TTL]),
+	gen_server:cast(self(),{ttl,Database,TTL}).
+

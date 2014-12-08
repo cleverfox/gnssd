@@ -75,21 +75,40 @@ init([]) ->
 	       {poolboy,start_link,[
 				    [{name,{local,redis}},
 				     {worker_module,eredis},
-				     {size,5},
+				     {size,3},
 				     {max_overflow,20}
 				    ],
-				    [ RedisHost,RedisPort ]
+				    [ {host, RedisHost}, 
+				      {port, RedisPort}
+				    ] 
 				   ]},            % StartFun = {M, F, A}
 	       permanent,                         % Restart  = permanent | transient | temporary
 	       5000,                              % Shutdown = brutal_kill | int() >= 0 | infinity
 	       worker,                            % Type     = worker | supervisor
-	       [poolboy,mc_worker]                % Modules  = [Module] | dynamic
+	       [poolboy,eredis]                % Modules  = [Module] | dynamic
+	   },
+	   {   pool_redis1,
+	       {poolboy,start_link,[
+				    [{name,{local,redis1}},
+				     {worker_module,eredis},
+				     {size,2},
+				     {max_overflow,20}
+				    ],
+				    [ {host, RedisHost}, 
+				      {port, RedisPort},
+				      {database, 1}
+				    ] 
+				   ]},            % StartFun = {M, F, A}
+	       permanent,                         % Restart  = permanent | transient | temporary
+	       5000,                              % Shutdown = brutal_kill | int() >= 0 | infinity
+	       worker,                            % Type     = worker | supervisor
+	       [poolboy,eredis]                % Modules  = [Module] | dynamic
 	   },
 	   {   pool_mongo,
 	       {poolboy,start_link,[
 				    [{name,{local,mongo}},
 				     {worker_module,mc_worker},
-				     {size,5},
+				     {size,3},
 				     {max_overflow,20}
 				    ],
 				    [
@@ -125,17 +144,27 @@ init([]) ->
 				     {max_overflow,20}
 				    ]
 				   ]},             % StartFun = {M, F, A}
-	       permanent,                               % Restart  = permanent | transient | temporary
-	       5000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
-	       worker,                                  % Type     = worker | supervisor
-	       [poolboy]                            % Modules  = [Module] | dynamic
+	       permanent, 5000, worker,
+	       [poolboy]
 	   },
-	   {   redis2nginx,                             % Id       = internal id
-	       {redis2nginx,start_link, [ RedisHost,RedisPort, {SubChan,StripChan}, PS ] },             % StartFun = {M, F, A}
-	       permanent,                               % Restart  = permanent | transient | temporary
-	       2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
-	       worker,                                  % Type     = worker | supervisor
-	       []				        % Modules  = [Module] | dynamic
+	   {   redis2nginx,                             
+	       {redis2nginx,start_link, [ RedisHost,RedisPort, {SubChan,StripChan}, PS ] },             
+	       permanent, 2000, worker,
+	       [poolboy,pgsql_worker,epgsql]
+	   },
+	   {   redissource,
+	       {redissource,start_link, [ RedisHost,RedisPort, <<"source">> ] }, 
+	       permanent, 2000, worker,
+	       [poolboy,pgsql_worker,epgsql]
+	   },
+	   {   esub,
+	       {esub,start_link, [ RedisHost,RedisPort, <<"esub:*">> ] }, 
+	       permanent, 2000, worker,
+	       [poolboy,pgsql_worker,epgsql]
+	   },
+	   {   device_sup,
+	       {dev_sup,start_link, [ ] },
+	       permanent, 2000, supervisor, []
 	   }
 	   %       {   radius_dispatcher,                             % Id       = internal id
 	   %           {radius_dispatcher,start,[]},             % StartFun = {M, F, A}
