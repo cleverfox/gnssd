@@ -86,7 +86,7 @@ handle_call(_Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast({push,Chan,Payload}, State) ->
 	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", Payload}, [], []),
+	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
 	lager:debug("Push ~p:~p ~p",[Url,RC,Body]),
 	{noreply, State};
 
@@ -105,7 +105,7 @@ handle_cast(_Msg, State) ->
 %%--------------------------------------------------------------------
 handle_info({pmessage,_PSub,Chan,Payload,SrcPid}, State) ->
 	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", Payload}, [], []),
+	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
 	lager:debug("Push ~p:~p",[Url,RC,Body]),
 	eredis_sub:ack_message(SrcPid),
 	{noreply, State};
@@ -144,3 +144,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+%%%
+escape_payload(Payload) ->
+	binary:replace(Payload,<<"\"">>,<<"\\\"">>,[global]).
