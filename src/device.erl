@@ -100,21 +100,34 @@ handle_cast({stop, Reason}, State) ->
 	{stop, Reason, State};
 
 handle_cast({ds, List}, State) ->
-	lager:info("Worker ~p got datasource ~p",[State#state.id,List]),
+	%lager:info("Worker ~p got datasource ~p",[State#state.id,List]),
 	Notify=State#state.sub_position,
 	{_,[Lon, Lat]}=proplists:lookup(<<"position">>,List),
 	{_,Dir}=proplists:lookup(<<"dir">>,List),
 	{_,T}=proplists:lookup(<<"dt">>,List),
 	{_,Speed}=proplists:lookup(<<"sp">>,List),
 	Bi=integer_to_binary(State#state.id),
+	lager:info("dev ~p at ~p,~p (~p km/h) ~p deg",[binary_to_integer(Bi),round(Lon*10000)/10000,round(Lat*10000)/10000,Speed,round(Dir*10)/10]),
+
+	POIs=case psql:equery("select id from pois where ST_Intersects(geo,st_makepoint($1,$2))",[Lon,Lat]) of
+		    {ok,_Hdr,Dat} ->
+			    [ X || {X} <- Dat ];
+		    _Any -> 
+			    []
+	    end,
+	%lager:info("POI: ~p",[POIs]),
+
 	DevH= <<"device:lastpos:",Bi/binary>>,
+	DevP= <<"device:cpoi:",Bi/binary>>,
 	Redis=fun(W) -> 
 			      eredis:q(W, [ "hmset", DevH, 
-					"lon", f2b(Lon),
+					"lng", f2b(Lon),
 					"lat", f2b(Lat),
 					"dir", f2b(Dir),
 					"spd", f2b(Speed),
-				       	"t", T ])
+				       	"t", T ]),
+			      eredis:q(W, [ "del", DevP ]),
+			      eredis:q(W, [ "sadd", DevP ] ++ POIs)
 	      end,
 	poolboy:transaction(redis,Redis),
 	Data={struct,[
@@ -122,10 +135,11 @@ handle_cast({ds, List}, State) ->
 		      {dev,State#state.id},
 		      {dir,Dir},
 		      {spd,Speed},
+		      {pois, POIs},
 		      {pos,{array,[Lon, Lat]}}
 		     ]},
 	JSData=iolist_to_binary(mochijson2:encode(Data)),
-	lager:info("JS: ~p",[JSData]),
+	%lager:info("JS: ~p",[JSData]),
 	Fd=fun(E) ->
 			   gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
 	   end,
