@@ -3,13 +3,17 @@
 -export([equery/2,squery/1]).
 
 equery(Sql, Args) ->
-	lager:info("aSQL: ~p, Args ~p",[Sql,Args]),
-	poolboy:transaction(postgres, fun(Worker) ->
+	Time=now(),
+	Res=poolboy:transaction(postgres, fun(Worker) ->
 						      gen_server:call(Worker, {equery, Sql, Args}, 10000)
-				      end).
+				      end),
+	lager:debug("SQL: ~p, Args ~p, took ~p ms",[Sql,Args, timer:now_diff(now(),Time)/1000]),
+	Res.
 
 squery(Sql) ->
-	lager:info("SQL: ~p",[Sql]),
-	poolboy:transaction(postgres, fun(Worker) ->
+	Time=now(),
+	Res=poolboy:transaction(postgres, fun(Worker) ->
 						      gen_server:call(Worker, {squery, Sql}, 10000)
-				      end).
+				      end),
+	lager:debug("SQL: ~p, took ~p ms",[Sql, timer:now_diff(now(),Time)/1000]),
+	Res.
