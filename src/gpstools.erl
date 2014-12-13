@@ -1,6 +1,6 @@
 -module(gpstools).
 
--export([calc_diff/2,calc_az/2,azymuth/2,floor/1,mod/2,spher_to_cart/1,cart_to_spher/1,rotate/3,sphere_direct/3,sphere_directr/3]).
+-export([calc_diff/2,floor/1,mod/2,spher_to_cart/1,cart_to_spher/1,rotate/3,sphere_direct/3,sphere_directr/3,sphere_inverse/2,azimuth/2,dist/2]).
 
 calc_diff({Lat1, Lng1}, {Lat2, Lng2}) ->
 	Deg2rad = fun(Deg) -> math:pi()*Deg/180 end,
@@ -31,33 +31,6 @@ floor(X) ->
 mod(X,Y) ->
 	X-(floor(X/Y)*Y).
 
-
-calc_az({Lat1, Lng1}, {Lat2, Lng2}) ->
-	Deg2rad = fun(Deg) -> math:pi()*Deg/180 end,
-	[RLng1, RLat1, RLng2, RLat2] = [Deg2rad(Deg) || Deg <- [Lng1, Lat1, Lng2, Lat2]],
-	DLon = RLng2 - RLng1,
-
-	X=(math:cos(RLat1)*math:sin(RLat2)) - (math:sin(RLat1)*math:cos(RLat1)*math:cos(DLon)),
-	Y=math:sin(DLon)*math:cos(RLat2),
-	Z=math:atan(-Y/X)/math:pi()*180,
-	Z1=case (X < 0) of
-		   true -> Z+180;
-		   false -> Z
-	   end,
-	Z2=Deg2rad(-(mod(Z1+180,360)-180)),
-	PI2=2*math:pi(),
-	AR2=Z2-(PI2*floor(Z2/PI2)),
-	%% suppose radius of Earth is 6372.8 km
-	AR2*180/math:pi().
-
-azymuth({SX,SY},{DX,DY}) ->
-	DeltaX=DX-SX,
-	DeltaY=DY-SY,
-	A=180*((math:atan(DeltaX/DeltaY))/(math:pi())),
-	case A > 0 of
-		true -> A;
-		false -> 360+A
-	end.
 
 spher_to_cart({Y1,Y0}) ->
   P = math:cos(Y0),
@@ -91,11 +64,34 @@ rotate({X0,X1,X2}, A, I) ->
 	 case {J, K} of {2, _} -> OXJ; {_, 2} -> OXK; _ -> X2 end
 	}.
 
+azimuth(S,D) ->
+	{AZ,_Dist} = sphere_inverse(S,D),
+	AZ.
+
+dist(S,D) ->
+	{_AZ,Dist} = sphere_inverse(S,D),
+	Dist.
+
+sphere_inverse({S1,S2},{D1,D2}) ->
+	{O1,O2}=sphere_inverser(
+		  {S1*math:pi()/180,S2*math:pi()/180},
+		  {D1*math:pi()/180,D2*math:pi()/180}
+			      ),
+	{O1*180/math:pi(),O2*6372.8}.
+
+sphere_inverser({P1X,P1Y}, P2) ->
+  X=spher_to_cart(P2),
+  X1=rotate(X, P1X, 2),
+  X2=rotate(X1, math:pi()/2 - P1Y, 1),
+  {PT1,PT0}=cart_to_spher(X2),
+  {math:pi() - PT1, math:pi()/2 - PT0}.
+
 
 sphere_direct({S1,S2},Azi, Dist) ->
 	{O1,O2}=sphere_directr({S1*math:pi()/180,S2*math:pi()/180},
 			       Azi*math:pi()/180,
-			       Dist/(2*math:pi()*6372.8)),
+			       (Dist/6372.8)
+			      ),
 	{O1*180/math:pi(),O2*180/math:pi()}.
 sphere_directr({S1,S2},Azi, Dist) ->
    %double pt[2], x[3];
