@@ -123,13 +123,13 @@ handle_info({message,_Chan,Payload,SrcPid}, State) ->
 		   {struct,List} when is_list(List) ->
 			DevID = case proplists:lookup(<<"imei">>,List) of
 					   {<<"imei">>, IMEIb} ->
-						   lager:info("Ok, imei is ~p",[IMEIb]),
+						   %lager:info("Ok, imei is ~p",[IMEIb]),
 						   imei2deviceID(binary_to_list(IMEIb),State#state.imeicache);
 					   _none ->
 						   lager:info("There is no imei :("),
 						   {error, false, State}
 				   end, 
-			   lager:info("Ok, device ~p",[DevID]),
+			   %lager:info("Ok, device ~p",[DevID]),
 			   case DevID of 
 				   {ok, ID, D2} -> 
 					   case global:whereis_name({device,ID}) of
