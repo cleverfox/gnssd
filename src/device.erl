@@ -18,7 +18,9 @@
 	  type,
 	  settings, 
 	  sub_position,
-	  sub_event
+	  cur_poi,
+	  history_raw,
+	  chour
 	 }).
 
 %%%===================================================================
@@ -100,51 +102,7 @@ handle_cast({stop, Reason}, State) ->
 	{stop, Reason, State};
 
 handle_cast({ds, List}, State) ->
-	%lager:info("Worker ~p got datasource ~p",[State#state.id,List]),
-	Notify=State#state.sub_position,
-	{_,[Lon, Lat]}=proplists:lookup(<<"position">>,List),
-	{_,Dir}=proplists:lookup(<<"dir">>,List),
-	{_,T}=proplists:lookup(<<"dt">>,List),
-	{_,Speed}=proplists:lookup(<<"sp">>,List),
-	Bi=integer_to_binary(State#state.id),
-	lager:info("dev ~p at ~p,~p (~p km/h) ~p deg",[binary_to_integer(Bi),round(Lon*10000)/10000,round(Lat*10000)/10000,Speed,round(Dir*10)/10]),
-
-	POIs=case psql:equery("select id from pois where ST_Intersects(geo,st_makepoint($1,$2))",[Lon,Lat]) of
-		    {ok,_Hdr,Dat} ->
-			    [ X || {X} <- Dat ];
-		    _Any -> 
-			    []
-	    end,
-	%lager:info("POI: ~p",[POIs]),
-
-	DevH= <<"device:lastpos:",Bi/binary>>,
-	DevP= <<"device:cpoi:",Bi/binary>>,
-	Redis=fun(W) -> 
-			      eredis:q(W, [ "hmset", DevH, 
-					"lng", f2b(Lon),
-					"lat", f2b(Lat),
-					"dir", f2b(Dir),
-					"spd", f2b(Speed),
-				       	"t", T ]),
-			      eredis:q(W, [ "del", DevP ]),
-			      eredis:q(W, [ "sadd", DevP ] ++ POIs)
-	      end,
-	poolboy:transaction(redis,Redis),
-	Data={struct,[
-		      {type,position},
-		      {dev,State#state.id},
-		      {dir,Dir},
-		      {spd,Speed},
-		      {pois, POIs},
-		      {pos,{array,[Lon, Lat]}}
-		     ]},
-	JSData=iolist_to_binary(mochijson2:encode(Data)),
-	%lager:info("JS: ~p",[JSData]),
-	Fd=fun(E) ->
-			   gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
-	   end,
-	lists:foreach(Fd,Notify),
-	{noreply, State};
+	ds(List,State);
 
 handle_cast({sub, Type}, State) ->
 	{ok,PSub,TTL}=esub:device_get_sub("position",State#state.id),
@@ -193,6 +151,7 @@ terminate(_Reason, _State) ->
 %% @end
 %%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
+	lager:info("CodeChange from ~p, extra ~p",[_OldVsn, _Extra]),
     {ok, State}.
 
 %%%===================================================================
@@ -201,4 +160,114 @@ code_change(_OldVsn, State, _Extra) ->
 reload_after(Database,TTL) ->
 	lager:info("Set ~p timer to ~p",[Database,TTL]),
 	gen_server:cast(self(),{ttl,Database,TTL}).
+
+dump_stat(State) ->
+	HR=case State#state.history_raw of
+		   M when is_list(M) -> M;
+		   _ -> []
+	   end,
+	%HR1 = [ list_to_tuple(lists:flatten([ tuple_to_list(S1) || S1 <- Src ])) || {_,_,Src} <- HR ],
+	Fx=fun({K,V},AccIn) ->
+			   AccIn ++ [K,V]
+	   end,
+	%HR1 = lists:foldl(Fx,[],[ Src || {_,_,Src} <- HR ]),
+	HR1 = [ list_to_tuple(lists:foldl(Fx,[],Src)) || {_,_,Src} <- HR ],
+%	lager:debug("Dump ~p",[HR1]),
+	mng:ins_update(<<"rawdata">>,
+				   {type,rawdata,
+					device,State#state.id,
+					hour,State#state.chour},
+				   {raw,HR1}
+				  ),
+	ok.
+
+switch_hour(State) ->
+	dump_stat(State),
+	lager:info("Switch hour"),
+	State#state{history_raw=[]}.
+
+process_ds(List,State) ->
+	Notify=State#state.sub_position,
+	{_,[Lon, Lat]}=proplists:lookup(<<"position">>,List),
+	{_,Dir}=proplists:lookup(<<"dir">>,List),
+	{_,T}=proplists:lookup(<<"dt">>,List),
+	{_,Speed}=proplists:lookup(<<"sp">>,List),
+	UnixHour=gpstools:floor(T/3600),
+
+	POIs=case psql:equery("select id from pois where ST_Intersects(geo,st_makepoint($1,$2))",[Lon,Lat]) of
+		    {ok,_Hdr,Dat} ->
+			    [ X || {X} <- Dat ];
+		    _Any -> 
+			    []
+	    end,
+	OLDPois=case is_list(State#state.cur_poi) of
+			true -> State#state.cur_poi;
+			_ -> []
+		end,
+	POId=[in,lists:subtract(POIs,OLDPois),out,lists:subtract(OLDPois,POIs)],
+	lager:info("dev ~p at ~p,~p (~p km/h) ~p deg, in ~p, Diff ~p",[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,Speed,round(Dir*10)/10,POIs,POId]),
+	%lager:info("POI: ~p",[POIs]),
+
+
+
+	%put data into Redis
+	Bi=integer_to_binary(State#state.id),
+	DevH= <<"device:lastpos:",Bi/binary>>,
+	DevP= <<"device:cpoi:",Bi/binary>>,
+	Redis=fun(W) -> 
+			      eredis:q(W, [ "hmset", DevH, 
+					"lng", f2b(Lon),
+					"lat", f2b(Lat),
+					"dir", f2b(Dir),
+					"spd", f2b(Speed),
+				       	"t", T ]),
+			      eredis:q(W, [ "del", DevP ]),
+			      eredis:q(W, [ "sadd", DevP ] ++ POIs)
+	      end,
+	poolboy:transaction(redis,Redis),
+
+
+	%send data to push stream
+	Data={struct,[
+		      {type,position},
+		      {dev,State#state.id},
+		      {dir,Dir},
+		      {spd,Speed},
+		      {pois, POIs},
+		      {pos,{array,[Lon, Lat]}}
+		     ]},
+	JSData=iolist_to_binary(mochijson2:encode(Data)),
+	%lager:info("JS: ~p",[JSData]),
+	Fd=fun(E) ->
+			   gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
+	   end,
+	lists:foreach(Fd,Notify),
+
+	PHist=case is_list(State#state.history_raw) of
+		      true -> State#state.history_raw;
+		      _ -> []
+	      end,
+	NewState=State#state{cur_poi=POIs, history_raw=PHist ++ [{T,now(),List}], chour=UnixHour},
+	dump_stat(NewState),
+	{noreply, NewState}.
+
+ds(List,State) ->
+	%lager:info("Worker ~p got datasource ~p",[State#state.id,List]),
+	{_,T}=proplists:lookup(<<"dt">>,List),
+	UnixHour=gpstools:floor(T/3600),
+	CurH=case State#state.chour of
+		M when is_integer(M) -> M;
+		_ -> UnixHour
+	end,
+	NextH=CurH+1,
+	case UnixHour of
+		CurH ->
+			process_ds(List,State);
+		NextH ->
+			S1=switch_hour(State),
+			process_ds(List,S1);
+		_ ->
+			lager:error("Fix me: spawn new worker and do my best"),
+			{noreply, State}
+	end.
 

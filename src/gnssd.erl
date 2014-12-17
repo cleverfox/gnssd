@@ -165,6 +165,10 @@ init([]) ->
 	   {   device_sup,
 	       {dev_sup,start_link, [ ] },
 	       permanent, 2000, supervisor, []
+	   },
+	   {   generator_sup,
+	       {generator_sup,start_link, [ ] },
+	       permanent, 2000, supervisor, []
 	   }
 	   %       {   radius_dispatcher,                             % Id       = internal id
 	   %           {radius_dispatcher,start,[]},             % StartFun = {M, F, A}

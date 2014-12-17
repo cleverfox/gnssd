@@ -138,18 +138,58 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+transpose([],Dict) -> 
+	Dict;
+
+transpose([{ID, List, TTL} | Rest],Dict) -> 
+	F=fun(I,TDict) ->
+			  TTL2=case catch dict:fetch({ttl,I}, TDict) of 
+					   T1 when is_integer(T1) ->
+						   case TTL<T1 of
+							   true -> TTL;
+							   false -> T1
+						   end;
+					   _ -> TTL
+				   end,
+			  D2=dict:append_list({l,I},[ID],TDict),
+			  dict:store({ttl,I},TTL2,D2)
+	  end,
+	Dict2=lists:foldl(F,Dict,List),
+	transpose(Rest,Dict2).
+
+
 process_all(Prefix) -> 
 	Arr=poolboy:transaction(redis,
-			    fun(Worker) -> 
-					    {ok, Array} = eredis:q(Worker, [ "keys", Prefix ++ "*" ]),
-					    Array
-			    end
-			   ),
-	[ process_sub(X)  || X <- Arr ].
+							fun(Worker) -> 
+									Time1=now(),
+									{ok, Array} = eredis:q(Worker, [ "keys", Prefix ++ "*" ]),
+									lager:info("Fetch keys ~p",[timer:now_diff(now(),Time1)/1000]),
+									GetItems = fun(X) ->
+													   %																			 eredis:q(Worker, [ "expire", X, "5" ]),
+													   {ok, TTL} = eredis:q(Worker, [ "ttl", X ]),
+													   case binary_to_integer(TTL) > 0 of
+														   true -> 
+															   {ok, A1} = eredis:q(Worker, [ "smembers", X ]),
+															   {X,[catch binary_to_integer(M) || M <- A1 ] ,binary_to_integer(TTL)};
+														   _ -> 
+															   {X,[],TTL}
+													   end
+											   end,
+									Time2=now(),
+									R=[ GetItems(X) || X<-Array ],
+									lager:info("Fetch values ~p",[timer:now_diff(now(),Time2)/1000]),
+									R
+							end
+						   ),
+	%[ process_sub(X)  || X <- Arr ].
+	Time3=now(),
+	TD=transpose(Arr,dict:new()),
+	lager:info("Transpose ~p",[timer:now_diff(now(),Time3)/1000]),
+	[ {N,dict:fetch({l,N},TD),dict:fetch({ttl,N},TD)} || {l,N} <- dict:fetch_keys(TD) ].
 
 process_sub(Name) when is_binary(Name) -> 
 	%lager:info("Row: ~p",[Name]), 
-	R0=process_unsub(<<"-",Name/binary>>, 0),
+	R0=process_unsub(Name, 0),
 	R=process_sub(Name, 0),
 	{ok,Name,R0,R};
 
@@ -159,7 +199,7 @@ process_sub(Name) when is_list(Name) ->
 process_unsub(Name, Cursor) ->
 	{N,Array}=poolboy:transaction(redis,
 		fun(Worker) -> 
-				{ok, [Next, Array]} = eredis:q(Worker, [ "sscan", Name, Cursor, "count", "10" ]),
+				{ok, [Next, Array]} = eredis:q(Worker, [ "sscan", <<"-",Name/binary>>, Cursor, "count", "10" ]),
 				{Next, Array}
 		end
 	),
@@ -167,6 +207,7 @@ process_unsub(Name, Cursor) ->
 	Fw=fun(Worker) -> 
 			   Fx=fun(E) ->
 					      Key= <<"worker:",E/binary,":",Name/binary>>,
+						  lager:info("Delete ~p",[Key]),
 					      {ok, Pv} = eredis:q(Worker,["del",Key]),
 					      case Pv of 
 						      <<"1">> -> false;
@@ -181,7 +222,7 @@ process_unsub(Name, Cursor) ->
 		_ ->
 			poolboy:transaction(redis,
 					    fun(Worker) -> 
-							    eredis:q(Worker, [ "del", Name ]),
+							    eredis:q(Worker, [ "del", <<"-",Name/binary>> ]),
 							    ok
 					    end
 					   )
@@ -250,9 +291,9 @@ process_sub(Name, Cursor) ->
 gen_rand() -> 
 	Fx=fun(Worker) -> 
 			X="esub:position:s." ++ md5:md5_hex(io_lib:format("~p", [random:uniform()])), 
-			RndList=[ erlang:trunc(random:uniform()*1000) || _X <- lists:seq(1,1500) ],
+			RndList=[ erlang:trunc(random:uniform()*2000) || _X <- lists:seq(1,1000) ],
 			eredis:q(Worker, ["sadd", X ] ++ RndList ), 
-			eredis:q(Worker, ["expire", X, 300]), 
+			eredis:q(Worker, ["expire", X, 1800]), 
 			eredis:q(Worker, ["publish", "esub:position", X]) 
 	end,
 	poolboy:transaction(redis,Fx).

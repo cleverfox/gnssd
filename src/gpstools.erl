@@ -1,6 +1,6 @@
 -module(gpstools).
 
--export([calc_diff/2,floor/1,mod/2,spher_to_cart/1,cart_to_spher/1,rotate/3,sphere_direct/3,sphere_directr/3,sphere_inverse/2,azimuth/2,dist/2]).
+-export([calc_diff/2,floor/1,ceil/1,mod/2,spher_to_cart/1,cart_to_spher/1,rotate/3,sphere_direct/3,sphere_directr/3,sphere_inverse/2,azimuth/2,dist/2,decode_line/2,xmerlval/1,decode_path/1,mkpath/2,get_path/2]).
 
 calc_diff({Lat1, Lng1}, {Lat2, Lng2}) ->
 	Deg2rad = fun(Deg) -> math:pi()*Deg/180 end,
@@ -25,6 +25,14 @@ floor(X) ->
 	case (X - T) of
 		Neg when Neg < 0 -> T - 1;
 		Pos when Pos > 0 -> T;
+		_ -> T
+	end.
+
+ceil(X) ->
+	T = erlang:trunc(X),
+	case (X - T) of
+		Neg when Neg < 0 -> T;
+		Pos when Pos > 0 -> T+1;
 		_ -> T
 	end.
 
@@ -93,6 +101,7 @@ sphere_direct({S1,S2},Azi, Dist) ->
 			       (Dist/6372.8)
 			      ),
 	{O1*180/math:pi(),O2*180/math:pi()}.
+
 sphere_directr({S1,S2},Azi, Dist) ->
    %double pt[2], x[3];
   PT0 = math:pi()/2 - Dist,
@@ -102,3 +111,100 @@ sphere_directr({S1,S2},Azi, Dist) ->
   X3=rotate(X2, -S1, 2),		% второе вращение
   cart_to_spher(X3).	        	% декартовы -> сферические
  
+xsplit([],L1,L2) ->
+	case L1 of
+		[] -> L2;
+		_ -> L2 ++ L1
+	end;
+
+xsplit([A|Rest],L1,L2) ->
+	case A>=32 of
+		true -> 	
+			xsplit(Rest,L1 ++ [A-32],L2);
+		false ->
+			xsplit(Rest,[],L2 ++ [L1 ++ [A]])
+	end.
+
+decode_one([],Cur,_Off) -> 
+	case (Cur band 1) of
+		1 -> (bnot Cur) bsr 1;
+		0 -> Cur bsr 1
+	end;
+
+decode_one([A|Rest],Cur,Off)->
+	decode_one(Rest,Cur bor (A bsl Off),Off+5).
+
+decode_one(List) ->
+	decode_one(List, 0, 0).
+
+decode_line(Line,Prec0) ->
+	Prec=math:pow(10,-Prec0),
+	D1=[ M-63 || M<-Line ],
+	D2=[ decode_one(X)*Prec || X <- xsplit(D1,[],[])],
+	{D2}.
+
+mkpath({X1,Y1},{X2,Y2})->
+	Url="http://www.yournavigation.org/api/dev/route.php"++
+"?flat=" ++ float_to_list(Y1,[{decimals, 4}, compact]) ++ 
+"&flon=" ++ float_to_list(X1,[{decimals, 4}, compact]) ++ 
+"&tlat=" ++ float_to_list(Y2,[{decimals, 4}, compact]) ++ 
+"&tlon=" ++ float_to_list(X2,[{decimals, 4}, compact]), 
+	lager:info("Requesting ~p",[Url]),
+	{ok, {_,_,Body}} = httpc:request(get, {Url, []}, [], []),
+	decode_path(Body).
+
+decode_path(Body) ->
+	{Xml, _} = xmerl_scan:string(Body),
+	{_,C}=xmerlval(xmerl_xpath:string("//coordinates",Xml)),
+	B=list_to_binary(C),
+	B1=re:replace(B, "^\\s+|\\s+$", "", [{return, binary}, global]),
+	Fu=fun(E) -> 
+			   case E of 
+				   <<"">> ->
+					   {0,0};
+				   M when is_binary(M) -> 
+					   [X,Y]= esub:split(M,","),
+					   {binary_to_float(X),binary_to_float(Y)}
+			   end
+	   end,
+	[ Fu(E) || E<-esub:split(B1,"\n")].
+
+get_path(A,B) ->
+	Path=case psql:equery("select path from carpath where src=$1 and dst=$2",[A,B]) of
+		    {ok,_,Dat} ->
+			    [ X || {X} <- Dat ];
+		    _Any -> 
+				 []
+	    end,
+	case Path of 
+		[] ->
+			LL=case psql:equery("select lon,lat from waypoints where id =$1",[A]) of
+						{ok,_,[Dat1]} ->
+							 case psql:equery("select lon,lat from waypoints where id =$1",[B]) of
+								 {ok,_,[Dat2]} ->
+									 {Dat1,Dat2};
+								 _ -> 
+									 false
+							 end;
+						_ -> 
+							false
+					end,
+			case LL of 
+				{{X1,Y1},{X2,Y2}} -> 
+					Path1=mkpath({X1,Y1},{X2,Y2}),
+					JSON=iolist_to_binary(mochijson2:encode([ [NA,NB] || {NA,NB} <- Path1 ])),
+					psql:equery("insert into carpath (src, dst, path) values($1,$2,$3)",[A,B,JSON]),
+					Path1;
+				_ -> 
+					false
+			end;
+		_ -> [ {X,Y} || [X,Y] <- mochijson2:decode(Path) ]
+	end.
+	
+
+-include_lib("xmerl/include/xmerl.hrl").
+xmerlval(X) ->
+	[#xmlElement{name = N, content = [#xmlText{value = V}|_]}] = X,
+	{N, V}. 
+
+
