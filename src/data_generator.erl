@@ -228,7 +228,7 @@ handle_info({chpos,NewPos}, State) ->
 	Dist=gpstools:dist(State#state.position,NewPos),
 	LKM=12, %liters/100km
 	Fuel=LKM*Dist/100,
-	NFuel=State#state.fuel-Fuel,
+	NFuel=case State#state.fuel of M when is_float(M) -> M; _ -> 10 end -Fuel,
 	S2=step(State#state{position=NewPos,fuel=NFuel}),
 	%lager:info("ChPos ~p",[NewPos]),
 %	lager:info("NewPos ~p, Heading to ~p ~p, ~p",[

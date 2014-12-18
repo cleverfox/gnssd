@@ -129,6 +129,12 @@ handle_info({message,_Chan,Payload,SrcPid}, State) ->
 						   lager:info("There is no imei :("),
 						   {error, false, State}
 				   end, 
+%			DevTime = case proplists:lookup(<<"dt">>,List) of
+%						  {<<"dt">>, TimestampB} when is_binary(TimestampB) ->
+%							  binary_to_integer(TimestampB);
+%						  _ ->
+%							  0
+%					  end, 
 			   %lager:info("Ok, device ~p",[DevID]),
 			   case DevID of 
 				   {ok, ID, D2} -> 

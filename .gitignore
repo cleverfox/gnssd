@@ -1,4 +1,6 @@
 *~
+*.swp
+*.erl1
 *.beam
 .rebar
 deps/*
