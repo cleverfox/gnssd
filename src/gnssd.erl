@@ -87,23 +87,23 @@ init([]) ->
 	       worker,                            % Type     = worker | supervisor
 	       [poolboy,eredis]                % Modules  = [Module] | dynamic
 	   },
-	   {   pool_redis1,
-	       {poolboy,start_link,[
-				    [{name,{local,redis1}},
-				     {worker_module,eredis},
-				     {size,2},
-				     {max_overflow,20}
-				    ],
-				    [ {host, RedisHost}, 
-				      {port, RedisPort},
-				      {database, 1}
-				    ] 
-				   ]},            % StartFun = {M, F, A}
-	       permanent,                         % Restart  = permanent | transient | temporary
-	       5000,                              % Shutdown = brutal_kill | int() >= 0 | infinity
-	       worker,                            % Type     = worker | supervisor
-	       [poolboy,eredis]                % Modules  = [Module] | dynamic
-	   },
+%	   {   pool_redis1,
+%		   {poolboy,start_link,[
+%				    [{name,{local,redis1}},
+%				     {worker_module,eredis},
+%				     {size,2},
+%				     {max_overflow,20}
+%				    ],
+%				    [ {host, RedisHost}, 
+%				      {port, RedisPort},
+%				      {database, 1}
+%				    ] 
+%				   ]},            % StartFun = {M, F, A}
+%	       permanent,                         % Restart  = permanent | transient | temporary
+%	       5000,                              % Shutdown = brutal_kill | int() >= 0 | infinity
+%	       worker,                            % Type     = worker | supervisor
+%	       [poolboy,eredis]                % Modules  = [Module] | dynamic
+%	   },
 	   {   pool_mongo,
 	       {poolboy,start_link,[
 				    [{name,{local,mongo}},
@@ -158,7 +158,7 @@ init([]) ->
 	       [poolboy,pgsql_worker,epgsql]
 	   },
 	   {   esub,
-	       {esub,start_link, [ RedisHost,RedisPort, <<"esub:*">> ] }, 
+	       {esub2,start_link, [ RedisHost,RedisPort, <<"esub:*">> ] }, 
 	       permanent, 2000, worker,
 	       [poolboy,pgsql_worker,epgsql]
 	   },

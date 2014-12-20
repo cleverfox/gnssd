@@ -157,6 +157,16 @@ transpose([{ID, List, TTL} | Rest],Dict) ->
 	Dict2=lists:foldl(F,Dict,List),
 	transpose(Rest,Dict2).
 
+transpose2([],Dict) -> 
+	Dict;
+
+transpose2([{ID, List, TTL} | Rest],Dict) -> 
+	F=fun(I,TDict) ->
+			  dict:append_list({l,I},[{ID,TTL}],TDict)
+	  end,
+	Dict2=lists:foldl(F,Dict,List),
+	transpose2(Rest,Dict2).
+
 
 process_all(Prefix) -> 
 	Arr=poolboy:transaction(redis,
@@ -167,10 +177,11 @@ process_all(Prefix) ->
 									GetItems = fun(X) ->
 													   %																			 eredis:q(Worker, [ "expire", X, "5" ]),
 													   {ok, TTL} = eredis:q(Worker, [ "ttl", X ]),
-													   case binary_to_integer(TTL) > 0 of
+													   ITTL=binary_to_integer(TTL),
+													   case ITTL > 0 of
 														   true -> 
 															   {ok, A1} = eredis:q(Worker, [ "smembers", X ]),
-															   {X,[catch binary_to_integer(M) || M <- A1 ] ,binary_to_integer(TTL)};
+															   {X,[ catch binary_to_integer(M) || M <- A1 ] ,ITTL};
 														   _ -> 
 															   {X,[],TTL}
 													   end
@@ -183,9 +194,12 @@ process_all(Prefix) ->
 						   ),
 	%[ process_sub(X)  || X <- Arr ].
 	Time3=now(),
-	TD=transpose(Arr,dict:new()),
+%	TD=transpose(Arr,dict:new()),
+%	lager:info("Transpose ~p",[timer:now_diff(now(),Time3)/1000]),
+%	[ {N,dict:fetch({l,N},TD),dict:fetch({ttl,N},TD)} || {l,N} <- dict:fetch_keys(TD) ].
+	TD=transpose2(Arr,dict:new()),
 	lager:info("Transpose ~p",[timer:now_diff(now(),Time3)/1000]),
-	[ {N,dict:fetch({l,N},TD),dict:fetch({ttl,N},TD)} || {l,N} <- dict:fetch_keys(TD) ].
+	[ {N,dict:fetch({l,N},TD)} || {l,N} <- dict:fetch_keys(TD) ].
 
 process_sub(Name) when is_binary(Name) -> 
 	%lager:info("Row: ~p",[Name]), 

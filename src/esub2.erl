@@ -13,7 +13,7 @@
          terminate/2,
          code_change/3]).
 
--export([gen_rand/0, device_get_sub/2, split/2]).
+-export([gen_rand/0, device_get_sub/2, device_get_sub/1, split/2]).
 
 -record(state, {redispid, chan, table, timer}).
 
@@ -188,7 +188,7 @@ process_all({Table, TableI}, Prefix) ->
 							ok
 					end
 			end,
-	lager:info("Notify ~p",[Notify]),
+	lager:debug("Notify ~p",[Notify]),
 	lists:foreach(Fnotify, Notify),
 	%[ process_sub(X)  || X <- Arr ].
 	%Time3=now(),
@@ -199,7 +199,6 @@ process_all({Table, TableI}, Prefix) ->
 
 
 process_sub2({Table, TableI}, Name, List, TTL) -> 
-	lager:info("sub2 ~p ~p ~p",[Name,List,TTL]),
 	{Add,Del} = case ets:lookup(TableI,Name) of
 					[] ->
 						{List,[]};
@@ -207,14 +206,12 @@ process_sub2({Table, TableI}, Name, List, TTL) ->
 						{lists:subtract(List,XAr),
 						 lists:subtract(XAr,List)}
 				end,
-	lager:info("Found ~p: add ~p del ~p",[Name,Add,Del]),
+	lager:debug("Found ~p: add ~p del ~p",[Name,Add,Del]),
 	FAdd=fun(Elm) ->
-				 lager:info("ADd ~p",[{Elm,Name}]),
 				 ets:insert(Table,{Elm,Name})
 		 end,
 	lists:foreach(FAdd,Add),
 	FDel=fun(Elm) ->
-				 lager:info("DElete ~p",[{Elm,Name}]),
 				 ets:delete_object(Table,{Elm,Name})
 		 end,
 	lists:foreach(FDel,Del),
@@ -253,7 +250,7 @@ process_sub({Table, TableI}, Name) when is_binary(Name) ->
 							ok
 					end
 			end,
-	lager:info("Notify ~p",[Notify]),
+	lager:debug("Notify ~p",[Notify]),
 	lists:foreach(Fnotify, Notify);
 
 
@@ -261,11 +258,11 @@ process_sub(T, Name) when is_list(Name) ->
 	process_sub(T, list_to_binary(Name)).
 
 process_subr(Name, Cursor) ->
-	lager:info("Process_sub ~p, ~p",[Name, Cursor]),
+	lager:debug("Process_sub ~p, ~p",[Name, Cursor]),
 	{N,Array}=poolboy:transaction(redis,
 		fun(Worker) -> 
 			{ok, [Next, Array]} = eredis:q(Worker, [ "sscan", Name, Cursor, "count", "10" ]),
-			{Next, [ catch binary_to_integer(M) || M <- Array ]}
+			{Next, [ case catch binary_to_integer(M) of N when is_integer(N) -> N; _ -> 0 end || M <- Array ]}
 		end
 	),
 	case N of
@@ -286,43 +283,18 @@ gen_rand() ->
 	end,
 	poolboy:transaction(redis,Fx).
 
-device_get_subi(BMatch, Cursor) when is_binary(Cursor) -> %this guard never allow
-	{N, Array} = poolboy:transaction(redis1,
-		fun(Worker) -> 
-			{ok, [Nxt, Arr]} = eredis:q(Worker, [ "scan", Cursor, "match", BMatch  ]),
-			lager:info("geti ~p ~p ~p",[Nxt, BMatch, length(Arr)]),
-			{Nxt, [ xsplit(X) || X <- Arr ]}
-		end),
-	case N of
-		<<"0">> ->
-			Array;
-		Any when is_binary(Any) ->
-			Array ++ device_get_subi(BMatch, Any)
-	end;
-
-device_get_subi(BMatch, _Cursor) ->
-	poolboy:transaction(redis1,
-		fun(Worker) -> 
-			{ok, Arr} = eredis:q(Worker, [ "keys", BMatch  ]),
-			Arr % [ xsplit(X) || X <- Arr ]
-		end).
-
-device_get_mttl(_W,[],M) when is_integer(M), M>0, M<86400 -> M;
-device_get_mttl(_W,[],_M) -> 86400;
-device_get_mttl(W,[X | Rest ],M) ->
-	{ok, TTLb} = eredis:q(W, [ "ttl", X]),
-	TTL=list_to_integer(binary_to_list(TTLb)),
-	case TTL>0 andalso TTL < M of
-		true -> 
-			device_get_mttl(W,Rest,TTL);
-		false -> 
-			device_get_mttl(W,Rest,M)
-	end.
+device_get_sub(Device) ->
+	{ok, M}=device_get_sub(any, Device),
+	Fx=fun({C,X},Dict) ->
+			   dict:append_list(C,[X],Dict)
+	   end,
+	dict:to_list(lists:foldl(Fx,dict:new(),M)).
 
 device_get_sub(SPattern, Device) ->
 	Pattern=case SPattern of
 				B when is_binary(B) -> B;
 				B when is_list(B) -> list_to_binary(B);
+				any -> any;
 				B when is_atom(B) -> list_to_binary(atom_to_list(B));
 				_ -> any
 			end,
@@ -330,17 +302,13 @@ device_get_sub(SPattern, Device) ->
 	Fun=fun({_,X}) ->
 				[_,Type,Channel]=split(X,":"),
 				case Pattern of 
-					any -> {true, {Type,Channel}};
+					any -> {true, {list_to_atom(binary_to_list(Type)),Channel}};
 					Type -> {true, Channel};
 					_ -> false
 				end
 		end,
 
 	{ok,lists:filtermap(Fun,Sub)}.
-
-xsplit(Ident) ->
-	[_,_,_,_,ID]=split(Ident,":"),
-	ID.
 
 xsplit_type(Ident) ->
 	[_,Type,_]=split(Ident,":"),

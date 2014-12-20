@@ -191,6 +191,7 @@ get_path(A,B) ->
 					end,
 			case LL of 
 				{{X1,Y1},{X2,Y2}} -> 
+					%lager:info("Fetch path ~p ~p",[{X1,Y1},{X2,Y2}]),
 					Path1=mkpath({X1,Y1},{X2,Y2}),
 					JSON=iolist_to_binary(mochijson2:encode([ [NA,NB] || {NA,NB} <- Path1 ])),
 					psql:equery("insert into carpath (src, dst, path) values($1,$2,$3)",[A,B,JSON]),

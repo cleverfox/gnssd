@@ -13,7 +13,7 @@
          terminate/2,
          code_change/3]).
 
--record(state, {rect,speedlim,position,target,cspeed,debug,waypoint,az,imei,timer,fuel,path}).
+-record(state, {rect,speedlim,position,target,cspeed,extra,waypoint,az,imei,timer,fuel,path}).
 
 %%%===================================================================
 %%% API functions
@@ -64,12 +64,13 @@ step(State0) ->
 %			 _ -> 40.0
 %		 end,
 
-	Timeout0=case State0#state.debug of 
-			 debug ->
-				 2;
-			 _ -> 3+round(random:uniform()*30)
-		 end,
-	State=case gpstools:dist(State0#state.position,State0#state.target)>0.1 of 
+	Timeout0=3,
+%	Timeout0=case State0#state.debug of 
+%			 debug ->
+%				 2;
+%			 _ -> 3+round(random:uniform()*30)
+%		 end,
+	State=case gpstools:dist(State0#state.position,State0#state.target)>(State0#state.cspeed/(3600/Timeout0)) of 
 			  true ->
 				  State0#state{az=gpstools:azimuth(State0#state.position,
 												   State0#state.target)};
@@ -91,21 +92,19 @@ step(State0) ->
 								 _ -> 1
 							 end,
 						  {Dest,NewPath,NPoint} = case State0#state.path of
-													  [] ->
-														  NP=round(rand_speed([1,12])),
-														  [I1 | I2] =  gpstools:get_path(WP,NP),
-														  {I1, I2, NP};
 													  L when is_list(L) ->
 														  case L of
 															  [] -> 
-																  NP=round(rand_speed([1,12])),
+																  %NP=round(rand_speed([1,12])),
+																  {ok,_,[{NP}]}=psql:equery("select id from waypoints where active and id <> $1 order by random() limit 1",[WP]),
 																  [I1 | I2] =  gpstools:get_path(WP,NP),
 																  {I1, I2, NP};
 															  [I1 | I2] ->
 																  {I1, I2, WP}
 														  end;
 													  _ ->
-														  NP=round(rand_speed([1,12])),
+														  {ok,_,[{NP}]}=psql:equery("select id from waypoints where active and id <> $1 order by random() limit 1",[WP]),
+														  %NP=round(rand_speed([1,12])),
 														  [I1 | I2] =  gpstools:get_path(WP,NP),
 														  {I1, I2, NP}
 												  end,
@@ -156,8 +155,7 @@ step(State0) ->
 		  end,
 
 	St1=State#state{timer=Timer,fuel=Fuel,cspeed=Spd,az=AZ},
-	senddata(St1),
-	St1.
+	senddata(St1).
 
 
 init([IMEI]) ->
@@ -170,15 +168,19 @@ init([IMEI]) ->
 	%Dest={36.193948,51.739678}, %vpravo
 	%Dest={36.190186,51.737823}, %vniz
 	%Dest={36.186443,51.739678}, %vlevo
-	Here={36.1648, 51.7176}, %rand_point(Rect),
+	{ok,_,[{NP,Lon,Lat}]}=psql:equery("select id,lon,lat from waypoints where active order by random() limit 1",[]),
+	Here={Lon,Lat}, %rand_point(Rect),
        	%Dest=rand_point(Rect),
 	{ok, step(#state{
 		     imei=IMEI,
+			 path=[],
+			 waypoint=NP,
 		     rect=Rect,
 		     position=Here,
 		     target=Here,
 		     cspeed=10,
 		     speedlim=Speed,
+			 extra=dict:new(),
 		     az=0 %gpstools:azimuth(Here,Dest)
 		    })}.
 
@@ -254,8 +256,7 @@ handle_info({refuel, OldFuel, NewFuel, Done}, State) ->
 			   end,
 			erlang:send_after(10000,self(),{refuel, OldFuel, NewFuel, NextF1}),
 			Ns=State#state{cspeed=0,fuel=OldFuel+Done},
-			senddata(Ns),
-			Ns
+			senddata(Ns)
 	end,
 	{noreply, S2};
 
@@ -276,16 +277,18 @@ handle_info(nofly, State) ->
 	{noreply, State#state{cspeed=80, speedlim=[30,100]}}; 
 
 handle_info(debug, State) ->
+	D1=State#state.extra,
 	lager:info("debug ~p",[self()]),
-	{noreply, State#state{debug=debug}}; 
+	{noreply, State#state{extra=D1}}; 
 
 handle_info(sliv, State) ->
 	lager:info("sliv ~p",[self()]),
 	{noreply, State#state{fuel=10}}; 
 
 handle_info(nodebug, State) ->
+	D1=State#state.extra,
 	lager:info("debug ~p",[self()]),
-	{noreply, State#state{debug=undefined}}; 
+	{noreply, State#state{extra=D1}}; 
 
 handle_info(stop, State) ->
 	lager:info("Stop ~p",[self()]),
@@ -326,21 +329,40 @@ code_change(_OldVsn, State, _Extra) ->
 %%%
 senddata(State) ->
 	{Lon, Lat} = State#state.position,
-	{Ms,S,_Us} = erlang:now(),
-	Data={struct,[
-		      {imei,list_to_binary(State#state.imei)},
-		      {dir,State#state.az},
-		      {sp,State#state.cspeed},
-		      {dt,(Ms*1000000)+S},
-		      {in0,State#state.fuel},
-		      {position,{array,[Lon, Lat]}}
-		     ]},
-	Document=iolist_to_binary(mochijson2:encode(Data)),
-	%lager:info("Send ~p",[Document]),
+	{Ms,S,_Us} = Now = erlang:now(),
+	UT=(Ms*1000000)+S,
+	SOk=case dict:find(nextsend,State#state.extra) of 
+			{ok, TS} -> case timer:now_diff(Now, TS) > 0 of
+							true -> true;
+							_ -> case dict:find(sentaz,State#state.extra) of
+									 {ok, AZ} -> abs(AZ-State#state.az) > 30 ;
+									 _ -> false
+								 end
+						end;
+			_ -> true
+		end,
+	%lager:info("Now ~p, exp ~p, ok: ~p",[Now,dict:find(nextsend,State#state.extra), SOk]),
+	case SOk of 
+		true -> 
+			Data={struct,[
+						  {imei,list_to_binary(State#state.imei)},
+						  {dir,State#state.az},
+						  {sp,State#state.cspeed},
+						  {dt,UT},
+						  {in0,State#state.fuel},
+						  {position,{array,[Lon, Lat]}}
+						 ]},
+			Document=iolist_to_binary(mochijson2:encode(Data)),
+			%lager:info("Send ~p",[Document]),
 
-	Redis=fun(W) -> 
-			      eredis:q(W, [ "publish", "source", Document])
-	      end,
-	poolboy:transaction(redis,Redis).
-
+			Redis=fun(W) -> 
+						  eredis:q(W, [ "publish", "source", Document])
+				  end,
+			poolboy:transaction(redis,Redis),
+			UT2=UT+3+round(random:uniform()*57),
+			Next={gpstools:floor(UT2/1000000),gpstools:mod(UT2,1000000),0},
+			State#state{extra=dict:store(sentaz,State#state.az,dict:store(nextsend,Next,State#state.extra))};
+		_ ->
+			State
+	end.
 

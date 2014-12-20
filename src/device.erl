@@ -14,10 +14,13 @@
          code_change/3]).
 
 -record(state, {
-	  id,
+	  id, 
+	  fixedhour, 
+	  org_id,
 	  kind,
 	  settings, 
 	  sub_position,
+	  sub_ev,
 	  cur_poi,
 	  history_raw,
 	  history_events,
@@ -58,9 +61,9 @@ start_link(ID, Hour) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init1(ID,Kind,Settings,Hour) ->
-	{ok,PSub,TTL}=esub:device_get_sub("position",ID),
-	reload_after("position",TTL),
+init1(ID,Kind,OID,Settings,Hour) ->
+	{ok,PSub}=esub2:device_get_sub(position,ID),
+	ESub=esub2:device_get_sub(ID),
 	lager:info("Starting worker ~p ~p, sub ~p",[Kind,Settings,PSub]),
 	UnixHour=case Hour of 
 				 0 -> 
@@ -103,23 +106,29 @@ init1(ID,Kind,Settings,Hour) ->
 				history_events=[],
 				chour=CHour,
 				id=ID,
+				org_id=OID,
+				fixedhour=Hour,
 				kind=Kind,
 				settings=Settings,
 				sub_position=PSub,
+				sub_ev=ESub,
 				data=Dict2,
 				cur_poi=[]}
-	}
-	
-	.
+	}.
 
 init([ID]) ->
 	init([ID,0]);
 
 init([ID,Hour]) ->
 	lager:info("Staring ~p",[ID]),
-	case psql:equery("select kind,settings from devices where id=$1",[ID]) of
-		{ok,_Hdr,[{Kind,Settings}]} ->
-			init1(ID,Kind,Settings,Hour);
+	case psql:equery("select kind,settings,organisation_id from devices where id=$1",[ID]) of
+		{ok,_Hdr,[{Kind,Settings,OID}]} ->
+			CFG=case mochijson2:decode(Settings) of
+				{struct,Arr} when is_list(Arr) ->
+					[ {list_to_atom(binary_to_list(K)),V} || {K,V} <- Arr ];
+				_ -> []
+			end,
+			init1(ID,Kind,OID,CFG,Hour);
 		_ -> 
 			{error, cant_start}
 	end.
@@ -178,11 +187,30 @@ handle_cast({ds, List, TTL}, State) ->
 handle_cast(dump, State) ->
 	{noreply, dump_stat(State,1)};
 
-handle_cast({sub, Type}, State) ->
-	{ok,PSub,TTL}=esub:device_get_sub("position",State#state.id),
-	reload_after("position",TTL),
-	lager:info("Worker ~p got notification ~p",[State#state.id,Type]),
-	{noreply, State#state{sub_position=PSub}};
+handle_cast({sub, SType}, State) ->
+	Type=case SType of
+			 M when is_atom(M) -> M;
+			 M when is_list(M) -> list_to_atom(M);
+			 M when is_binary(M) -> list_to_atom(binary_to_list(M));
+			 _ -> unknown
+		 end,
+	{ok,PSub}=esub2:device_get_sub(position,State#state.id),
+	{ok,Sub}=esub2:device_get_sub(Type,State#state.id),
+	lager:debug("Worker ~p got notification ~p",[State#state.id,Type]),
+	SubEV=State#state.sub_ev,
+	{ESub,Found}=lists:mapfoldl(fun({K,V}, F)-> 
+										case K of 
+											Type ->
+												{{K, Sub}, F+1};
+											_ ->
+												{{K,V}, F}
+										end
+								end, 0, SubEV),
+	ESub2=case Found of
+			  0 -> SubEV ++ [{Type, Sub}];
+			  _ -> ESub
+		  end,
+	{noreply, State#state{sub_position=PSub,sub_ev=ESub2}};
 
 handle_cast(_Msg, State) ->
 	lager:info("Worker ~p got cast ~p",[State#state.id,_Msg]),
@@ -234,10 +262,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-reload_after(Database,TTL) ->
-	lager:info("Set ~p timer to ~p",[Database,TTL]),
-	gen_server:cast(self(),{ttl,Database,TTL}).
-
 dump_stat(State) ->
 	dump_stat(State, 0).
 
@@ -289,7 +313,8 @@ process_ds(List,State) ->
 
 	NewState=case T > State#state.last_ptime of
 				 true ->
-					 POIs=case psql:equery("select id from pois where ST_Intersects(geo,st_makepoint($1,$2))",[Lon,Lat]) of
+					 POIs=case psql:equery("select id from pois where (organisation_id=$3 or organisation_id is null) and ST_Intersects(geo,st_makepoint($1,$2))",
+										   [Lon,Lat,State#state.org_id]) of
 							  {ok,_Hdr,Dat} ->
 								  [ X || {X} <- Dat ];
 							  _Any -> 
@@ -339,6 +364,7 @@ process_ds(List,State) ->
 					 JSData=iolist_to_binary(mochijson2:encode(Data)),
 					 %lager:info("JS: ~p",[JSData]),
 					 Fd=fun(E) ->
+								%lager:info("Dev ~p Send notify ~p ~p",[State#state.id,E,JSData]),
 								gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
 						end,
 					 lists:foreach(Fd,Notify),
@@ -359,41 +385,50 @@ ds(List0, State, TTL) ->
 	end,
 
 
-%	lager:info("Worker ~p got datasource ~p",[State#state.id,List0]),
+	%	lager:info("Worker ~p got datasource ~p",[State#state.id,List0]),
 	List=[ {case K of B when is_binary(B) -> list_to_atom(binary_to_list(B)); _-> K end,V} || {K,V} <- List0 ],
 	{_,T}=proplists:lookup(dt,List),
 	UnixHour=gpstools:floor(T/3600),
-	CurH=case State#state.chour of
-		M when is_integer(M) -> M;
-		_ -> UnixHour
-	end,
-	NextH=CurH+1,
-	Res=case UnixHour of
-		CurH ->
-			process_ds(List,State);
-		NextH ->
-			S1=switch_hour(State),
-			process_ds(List,S1);
-		_Any when _Any > NextH ->
-			lager:error("Data from future!!! ~p: Current hour ~p, Data hour ~p",[State#state.id,State#state.chour, UnixHour]),
-			State;
-		_Any when _Any < CurH -> 
-%			lager:error("Fix me: spawn new worker and do my best ~p: ~p, ~p",[State#state.id,State#state.chour, UnixHour]),
-			case global:whereis_name({device, State#state.id, UnixHour}) of
-				undefined -> 
-					case supervisor:start_child(dev_sup,[State#state.id, UnixHour]) of
-						{ok,Pid} -> 
-%							lager:error("Ok, found pid  ~p",[Pid]),
-							gen_server:cast(Pid,{ds, List, TTL-1});
-						Any -> 
-							lager:error("Can't start device: ~p",[Any])
-					end;
-				Pid ->
-%					lager:error("Ok, found pid  ~p",[Pid]),
-					gen_server:cast(Pid,{ds, List, TTL-1})
-			end,
-			State
-	end,
+	Res=case State#state.fixedhour of
+			0 ->
+				CurH=case State#state.chour of
+						 0 -> UnixHour;
+						 M when is_integer(M) -> M;
+						 _ -> UnixHour
+					 end,
+				NextH=CurH+1,
+				case UnixHour of
+					CurH ->
+						process_ds(List,State);
+					NextH ->
+						S1=switch_hour(State),
+						process_ds(List,S1);
+					_Any when _Any > NextH ->
+						lager:error("Data from future!!! ~p: Current hour ~p, Data hour ~p",[State#state.id,State#state.chour, UnixHour]),
+						State;
+					_Any when _Any < CurH -> 
+						case global:whereis_name({device, State#state.id, UnixHour}) of
+							undefined -> 
+								case supervisor:start_child(dev_sup,[State#state.id, UnixHour]) of
+									{ok,Pid} -> 
+										gen_server:cast(Pid,{ds, List, TTL-1});
+									Any -> 
+										lager:error("Can't start device: ~p",[Any])
+								end;
+							Pid ->
+								gen_server:cast(Pid,{ds, List, TTL-1})
+						end,
+						State
+				end;
+
+			FH when is_integer(FH) -> 
+				case UnixHour of
+					FH ->
+						process_ds(List,State);
+					_ -> 
+						lager:error("It is not my ds (my fixed hour ~p:~p, but ~p come)",[State#state.id,FH,UnixHour])
+				end
+		end,
 	Timeo=case dict:find(timeout,State#state.data) of
 			  {ok, MM} -> MM;
 			  _ -> 3600
