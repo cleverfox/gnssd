@@ -24,6 +24,8 @@
 	  cur_poi,
 	  history_raw,
 	  history_events,
+	  history_processed,
+	  current_values,
 	  chour,
 	  data,
 	  last_ptime
@@ -113,6 +115,7 @@ init1(ID,Kind,OID,Settings,Hour) ->
 				sub_position=PSub,
 				sub_ev=ESub,
 				data=Dict2,
+				current_values=dict:new(),
 				cur_poi=[]}
 	}.
 
@@ -123,15 +126,18 @@ init([ID,Hour]) ->
 	lager:info("Staring ~p",[ID]),
 	case psql:equery("select kind,settings,organisation_id from devices where id=$1",[ID]) of
 		{ok,_Hdr,[{Kind,Settings,OID}]} ->
-			CFG=case mochijson2:decode(Settings) of
-				{struct,Arr} when is_list(Arr) ->
-					[ {list_to_atom(binary_to_list(K)),V} || {K,V} <- Arr ];
-				_ -> []
-			end,
+			CFG=case decode_settings(Settings) of
+					{ok, C} -> 
+						C;
+					_ -> 
+						lager:error("Can't decode config for device ~p",[ID]),
+						 []
+				end,
 			init1(ID,Kind,OID,CFG,Hour);
 		_ -> 
 			{error, cant_start}
 	end.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -211,6 +217,21 @@ handle_cast({sub, SType}, State) ->
 			  _ -> ESub
 		  end,
 	{noreply, State#state{sub_position=PSub,sub_ev=ESub2}};
+
+handle_cast(reload_settings, State) ->
+	lager:info("reload ~p",[State#state.id]),
+	case psql:equery("select kind,settings from devices where id=$1",[State#state.id]) of
+		{ok,_Hdr,[{Kind,Settings}]} ->
+			case decode_settings(Settings) of
+					{ok, C} -> 
+						{noreply, State#state{settings=C,kind=Kind}};
+					_ -> 
+					{noreply, State}
+				end;
+		_ -> 
+			lager:error("Can't reload settings for ~p",[State#state.id]),
+			{noreply, State}
+	end;
 
 handle_cast(_Msg, State) ->
 	lager:info("Worker ~p got cast ~p",[State#state.id,_Msg]),
@@ -300,7 +321,11 @@ switch_hour(State) ->
 	St1#state{history_raw=[]}.
 
 process_ds(List,State) ->
-	Notify=State#state.sub_position,
+	%Notify=State#state.sub_position,
+	Notify=case lists:keyfind(position,1,State#state.sub_ev) of
+			   {position, L} when is_list(L) -> L;
+			   _ -> []
+		   end,
 	{_,[Lon, Lat]}=proplists:lookup(position,List),
 	{_,Dir}=proplists:lookup(dir,List),
 	{_,T}=proplists:lookup(dt,List),
@@ -310,6 +335,17 @@ process_ds(List,State) ->
 			  true -> State#state.history_raw;
 			  _ -> []
 		  end,
+	%PEv=case is_list(State#state.history_events) of
+	%		  true -> State#state.history_events;
+	%		  _ -> []
+	%	  end,
+
+	%lager:info("Config ~p",[State#state.settings]),
+	%CurData=[{dt,T},
+	%		 {position,[Lon, Lat]},
+	%		 {dir, Dir},
+	%		 {speed,Speed}],
+
 
 	NewState=case T > State#state.last_ptime of
 				 true ->
@@ -330,10 +366,50 @@ process_ds(List,State) ->
 							 {_,Float} when is_float(Float) -> round(Float*100)/100;
 							 _ -> none
 						 end,
-					 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIIn,POIOut,In0],
-					 lager:info("dev ~p at ~p,~p (~p km/h) Pois ~p/~p in0: ~p",Log),
+					 In1=case proplists:lookup(in0,List) of
+							 {_,Floa} when is_float(Floa) -> round(Floa*100)/100;
+							 {_,Int} when is_integer(Int) -> Int;
+							 _ -> none
+						 end,
 					 %lager:info("POI: ~p",[POIs]),
+					 %lager:info("Sp ~p, St ~p",[Speed, proplists:get_value(minspeed,State#state.settings,1)]),
+					 Stop=Speed < proplists:get_value(minspeed,State#state.settings,1),
+					 {LStart,LStop,LState,LProcessed} = case dict:find(startstop,State#state.data) of
+										{ok, {A,B,C} } -> {A,B,C,false};
+										{ok, {A,B,C,D} } -> {A,B,C,D};
+										_ -> case Stop of
+												 true -> {T, T, stop, false};
+												 _ -> {T, T, drive, false}
+											 end
+									end,
+					 NSSData=case {Stop == (LState == stop), Stop} of
+							   {true, true} -> %Still stopped
+									 case LProcessed of
+										 true -> 
+											 {LStart, LStop, LState, LProcessed};
+										 false ->
+											 MStop=proplists:get_value(minstop,State#state.settings,300),
+											 case T - LStop >= MStop of
+												 true -> 
+													 lager:info("Car ~p Really stopped",[State#state.id]),
+													 {LStart, LStop, LState, true};
+												 false -> 
+													 {LStart, LStop, LState, LProcessed}
+											 end
+									 end;
+							   {true, false} -> %Still driveing
+								   {LStart, LStop, LState, false};
+							   {false, true} -> %stopped
+									 lager:info("Stop after ~p",[T-LStart]),
+								   {LStart, T, stop, false};
+							   {false, false} -> %started
+									 lager:info("Start after ~p",[T-LStop]),
+								   {T, LStop, drive, false}
+						   end,
+					 lager:info("Car ~p L ~p SSData ~p",[State#state.id,LState,NSSData]),
 
+					 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIIn,POIOut,In0,In1,element(3,NSSData)],
+					 lager:info("dev ~p at ~p,~p (~p km/h) Pois ~p/~p in0: ~p, in1: ~p, ~p",Log),
 
 					 %put data into Redis
 					 Bi=integer_to_binary(State#state.id),
@@ -344,7 +420,10 @@ process_ds(List,State) ->
 												 "lng", f2b(Lon),
 												 "lat", f2b(Lat),
 												 "dir", f2b(Dir),
-												 "spd", f2b(Speed),
+												 "spd", case Stop of 
+															true -> 0; 
+															_ -> f2b(Speed) 
+														end,
 												 "t", T ]),
 								   eredis:q(W, [ "del", DevP ]),
 								   eredis:q(W, [ "sadd", DevP ] ++ POIs)
@@ -359,6 +438,11 @@ process_ds(List,State) ->
 								   {dir,Dir},
 								   {spd,Speed},
 								   {pois, POIs},
+								   {color, case Speed of
+											   M when M<2 -> <<"blue">>;
+											   M when M<60 -> <<"green">>;
+											   _ -> <<"red">>
+										   end},
 								   {pos,{array,[Lon, Lat]}}
 								  ]},
 					 JSData=iolist_to_binary(mochijson2:encode(Data)),
@@ -369,7 +453,12 @@ process_ds(List,State) ->
 						end,
 					 lists:foreach(Fd,Notify),
 
-					 State#state{cur_poi=POIs, history_raw=PHist ++ [{T,now(),List}], chour=UnixHour};
+					 State#state{
+					   cur_poi=POIs, 
+					   history_raw=PHist ++ [{T,now(),List}], 
+					   chour=UnixHour, 
+					   data=dict:store(startstop,NSSData,State#state.data)
+					  };
 				 _ ->
 					 State#state{
 					   history_raw= lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
@@ -439,4 +528,55 @@ ds(List0, State, TTL) ->
 	D3=dict:store(last_ds,now(),D2),
 	{noreply, Res#state{data=D3}}.
 
+
+b2ia (Bin) ->
+	case catch binary_to_integer(Bin) of
+		X when is_integer(X) ->
+			X;
+		_Any -> 
+			list_to_atom(binary_to_list(Bin))
+	end.
+
+%binary_to_number(B) -> list_to_number(binary_to_list(B)).
+%list_to_number(L) ->
+%	try list_to_float(L)
+%	catch
+%		error:badarg ->
+%			list_to_integer(L)
+%	end.
+
+processStruct({struct, X},Path,TK) ->
+	[ { b2ia(I),processStruct(P,Path++[I],TK)} || {I,P} <- X ];
+processStruct(X,Path,TK) when is_list(X) ->
+	[ { b2ia(I),processStruct(P,Path++[I],TK)} || {I,P} <- X ];
+processStruct(X,Path,TK) ->
+	case TK of
+		undefined -> X;
+		F ->
+			F(X,Path)
+	end.	
+
+decode_settings(Settings) ->
+	Fun=fun(X,Path) ->
+				case Path of 
+					[<<"minstop">>] -> 
+						binary_to_integer(X);
+					[<<"minspeed">>] -> 
+						binary_to_integer(X);
+					[<<"inputs">>,_,<<"type">>] -> 
+						list_to_atom(binary_to_list(X));
+					_ ->
+						%lager:debug("Process val ~p at ~p",[X,Path]),
+						X
+				end
+		end,
+	case mochijson2:decode(Settings) of
+		{struct,Arr} when is_list(Arr) ->
+			P1=processStruct(Arr,[],Fun),
+			lager:info("ParseSettings ~p",[P1]),
+			{ok, P1};
+		_ -> 
+			lager:info("ParseSettings error ~p",[Settings]),
+			error 
+	end.
 

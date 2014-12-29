@@ -15,7 +15,7 @@
 
 -export([start/0, start/2, stop/1, init/1, test/0]).
 
--define(MAX_RESTART,    5).
+-define(MAX_RESTART,    10).
 -define(MAX_TIME,      60).
 
 %%%===================================================================

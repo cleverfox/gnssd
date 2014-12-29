@@ -70,10 +70,10 @@ step(State0) ->
 %				 2;
 %			 _ -> 3+round(random:uniform()*30)
 %		 end,
-	State=case gpstools:dist(State0#state.position,State0#state.target)>(State0#state.cspeed/(3600/Timeout0)) of 
+	{State,Finished}=case gpstools:dist(State0#state.position,State0#state.target)>(State0#state.cspeed/(3600/Timeout0)) of 
 			  true ->
-				  State0#state{az=gpstools:azimuth(State0#state.position,
-												   State0#state.target)};
+							 {State0#state{az=gpstools:azimuth(State0#state.position,
+												   State0#state.target)}, false};
 			  false -> %finished
 				  case Variant of
 					  first ->
@@ -83,38 +83,38 @@ step(State0) ->
 								   _ -> 
 									   {36.1648,51.7176}
 							   end,
-						  State0#state{target=Dest, 
+						  {State0#state{target=Dest, 
 									   cspeed=rand_speed(State0#state.speedlim),
-									   az=gpstools:azimuth(State0#state.position,Dest)};
+									   az=gpstools:azimuth(State0#state.position,Dest)},true};
 					  second -> 
 						  WP=case State0#state.waypoint of
 								 N when is_integer(N) -> N;
 								 _ -> 1
 							 end,
-						  {Dest,NewPath,NPoint} = case State0#state.path of
+						  {Dest,NewPath,NPoint,Fin} = case State0#state.path of
 													  L when is_list(L) ->
 														  case L of
 															  [] -> 
 																  %NP=round(rand_speed([1,12])),
 																  {ok,_,[{NP}]}=psql:equery("select id from waypoints where active and id <> $1 order by random() limit 1",[WP]),
 																  [I1 | I2] =  gpstools:get_path(WP,NP),
-																  {I1, I2, NP};
+																  {I1, I2, NP, true};
 															  [I1 | I2] ->
-																  {I1, I2, WP}
+																  {I1, I2, WP, false}
 														  end;
 													  _ ->
 														  {ok,_,[{NP}]}=psql:equery("select id from waypoints where active and id <> $1 order by random() limit 1",[WP]),
 														  %NP=round(rand_speed([1,12])),
 														  [I1 | I2] =  gpstools:get_path(WP,NP),
-														  {I1, I2, NP}
+														  {I1, I2, NP, false}
 												  end,
 						  %lager:info("New dst ~p ~p",[Dest,WP]),
-						  State0#state{target=Dest, 
+						  {State0#state{target=Dest, 
 									   waypoint=NPoint,
 									   cspeed=rand_speed(State0#state.speedlim),
 									   az=gpstools:azimuth(State0#state.position,Dest),
 									   path=NewPath
-									  }
+									  },Fin}
 				  end
 		  end,
 	SDist=State#state.cspeed*(Timeout0/3600),
@@ -147,15 +147,26 @@ step(State0) ->
 				 true -> round(random:uniform()*6+1)*5;
 				 false -> false
 			 end,
+	%lager:debug("Device ~p, finished ~p",[State0#state.imei,Finished]),
 	Timer=case Refuel of
 		false -> 
-				  erlang:send_after(1000*Timeout,self(),{chpos, P2});
+				  case Finished of 
+					  true -> 
+						  erlang:send_after(30000,self(),{wait, round(random:uniform()*10), finished});
+					  _ ->
+						  case random:uniform() < 0.01 of % random stop
+							  true -> 	  
+								  erlang:send_after(5000,self(),{wait, round(random:uniform()*12), pause});
+							  _ -> 
+								  erlang:send_after(1000*Timeout,self(),{chpos, P2})
+						  end
+				  end;
 			  Rf -> 
 				  erlang:send_after(10000,self(),{refuel, Fuel, Rf, 0})
 		  end,
 
 	St1=State#state{timer=Timer,fuel=Fuel,cspeed=Spd,az=AZ},
-	senddata(St1).
+	senddata(St1,false).
 
 
 init([IMEI]) ->
@@ -231,7 +242,13 @@ handle_info({chpos,NewPos}, State) ->
 	LKM=12, %liters/100km
 	Fuel=LKM*Dist/100,
 	NFuel=case State#state.fuel of M when is_float(M) -> M; _ -> 10 end -Fuel,
-	S2=step(State#state{position=NewPos,fuel=NFuel}),
+	POdometer=case dict:find(odometer,State#state.extra) of 
+				  {ok, TS} -> TS;
+				  _ -> 0
+			  end,
+	{_,RDist}=gpstools:sphere_inverse(State#state.position,NewPos),
+	Odometer=POdometer+RDist,
+	S2=step(State#state{position=NewPos,fuel=NFuel,extra=dict:store(odometer,Odometer,State#state.extra)}),
 	%lager:info("ChPos ~p",[NewPos]),
 %	lager:info("NewPos ~p, Heading to ~p ~p, ~p",[
 %						      NewPos,
@@ -256,7 +273,28 @@ handle_info({refuel, OldFuel, NewFuel, Done}, State) ->
 			   end,
 			erlang:send_after(10000,self(),{refuel, OldFuel, NewFuel, NextF1}),
 			Ns=State#state{cspeed=0,fuel=OldFuel+Done},
-			senddata(Ns)
+			senddata(Ns,false)
+	end,
+	{noreply, S2};
+
+handle_info({wait, Rest, Type}, State) ->
+	handle_info({wait, Rest, Type, 0}, State);
+
+handle_info({wait, Rest, Type, Num}, State) ->
+	%lager:info("Car ~p waiting ~p/~p ~p",[State#state.imei,Rest,Num,Type]),
+	erlang:cancel_timer(State#state.timer),
+	W=case Type of
+		  pause -> 5000;
+		  _ -> 30000
+	  end,
+	S2=case Rest < 1 of
+		true ->
+			erlang:send_after(W,self(),{chpos, State#state.position}),
+			State#state{cspeed=rand_speed(State#state.speedlim)};
+		false ->
+			erlang:send_after(W,self(),{wait, Rest-1, Type, Num+1}),
+			Ns=State#state{cspeed=0},
+			senddata(Ns,Num==0)
 	end,
 	{noreply, S2};
 
@@ -327,19 +365,24 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 %%%
-senddata(State) ->
+senddata(State,Force) ->
 	{Lon, Lat} = State#state.position,
 	{Ms,S,_Us} = Now = erlang:now(),
 	UT=(Ms*1000000)+S,
-	SOk=case dict:find(nextsend,State#state.extra) of 
-			{ok, TS} -> case timer:now_diff(Now, TS) > 0 of
-							true -> true;
-							_ -> case dict:find(sentaz,State#state.extra) of
-									 {ok, AZ} -> abs(AZ-State#state.az) > 30 ;
-									 _ -> false
-								 end
-						end;
-			_ -> true
+	SOk=case Force of 
+			true -> 
+				true;
+			_ -> 
+				case dict:find(nextsend,State#state.extra) of 
+					{ok, TS} -> case timer:now_diff(Now, TS) > 0 of
+									true -> true;
+									_ -> case dict:find(sentaz,State#state.extra) of
+											 {ok, AZ} -> abs(AZ-State#state.az) > 30 ;
+											 _ -> false
+										 end
+								end;
+					_ -> true
+				end
 		end,
 	%lager:info("Now ~p, exp ~p, ok: ~p",[Now,dict:find(nextsend,State#state.extra), SOk]),
 	case SOk of 
@@ -350,6 +393,11 @@ senddata(State) ->
 						  {sp,State#state.cspeed},
 						  {dt,UT},
 						  {in0,State#state.fuel},
+						  {in1,
+						   case dict:find(odometer,State#state.extra) of 
+							   {ok, TMP} -> TMP; _ -> 0
+						   end
+						  },
 						  {position,{array,[Lon, Lat]}}
 						 ]},
 			Document=iolist_to_binary(mochijson2:encode(Data)),
