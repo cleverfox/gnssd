@@ -30,7 +30,11 @@
 	  data,
 	  last_ptime
 	 }).
-
+-record(incfg, {dsname, 
+				type,
+				factor,
+				variable, 
+				ovfval}).
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -103,9 +107,27 @@ init1(ID,Kind,OID,Settings,Hour) ->
 				 0 -> 1800;
 				 _ -> 300
 			end, Dict),
+	Dict3=case poolboy:transaction(redis,
+							 fun(W)->
+									 eredis:q(W,[
+												 "hmget",
+												 "device:lastpos:"++integer_to_list(ID),
+												 "Start",
+												 "Stop",
+												 "Status",
+												 "StatusHandled"
+												]) end) of
+			  {ok,[Sta,Sto,Stt,Han]} when is_binary(Sta) andalso is_binary(Sto) andalso is_binary(Stt) andalso is_binary(Han) -> 
+				  dict:store(startstop, {b2i(Sta), b2i(Sto), b2a(Stt), b2a(Han) } , Dict2);
+			  _ -> 
+				  Dict2 
+			end,
+
+	%lager:info("Standup ~p",[dict:to_list(Dict3)]),
+
 	{ok, #state{last_ptime=LPTime,
 				history_raw=PLS,
-				history_events=[],
+				history_events=gb_trees:empty(),
 				chour=CHour,
 				id=ID,
 				org_id=OID,
@@ -114,7 +136,7 @@ init1(ID,Kind,OID,Settings,Hour) ->
 				settings=Settings,
 				sub_position=PSub,
 				sub_ev=ESub,
-				data=Dict2,
+				data=Dict3,
 				current_values=dict:new(),
 				cur_poi=[]}
 	}.
@@ -176,6 +198,14 @@ f2b(X) when is_integer(X) ->
        	integer_to_binary(X);
 f2b(X) when is_float(X) -> 
 	float_to_binary(X,[{decimals, 20}, compact]).
+b2i(X) when is_binary(X) ->
+	try 
+		binary_to_integer(X) 
+	catch 
+		error:_ -> 0 
+	end.
+b2a(X) when is_binary(X) ->
+	list_to_atom(binary_to_list(X)). 
 
 handle_cast({stop, Reason}, State) ->
 	S=dump_stat(State,1),
@@ -299,16 +329,27 @@ dump_stat(State, Force) ->
 				   M when is_list(M) -> M;
 				   _ -> []
 			   end,
-			%HR1 = [ list_to_tuple(lists:flatten([ tuple_to_list(S1) || S1 <- Src ])) || {_,_,Src} <- HR ],
-			%
-			%	lager:debug("Dump ~p",[HR1]),
-			HR1=mng:proplist2m(HR),
+			HR1=mng:proplist3tom(HR),
 			mng:ins_update(<<"rawdata">>,
 						   {type,rawdata,
 							device,State#state.id,
 							hour,State#state.chour},
 						   {raw,HR1}
 						  ),
+
+
+			PHR=case State#state.history_processed of
+				   M1 when is_list(M1) -> M1;
+				   _ -> []
+			   end,
+			PHR1=mng:proplist2tom(PHR),
+			mng:ins_update(<<"devicedata">>,
+						   {type,devicedata,
+							device,State#state.id,
+							hour,State#state.chour},
+						   {data,PHR1}
+						  ),
+
 			State#state{data=dict:store(lastdump,now(),State#state.data)};
 		false -> 
 			State
@@ -318,7 +359,11 @@ dump_stat(State, Force) ->
 switch_hour(State) ->
 	St1=dump_stat(State,1),
 	lager:info("Switch hour"),
-	St1#state{history_raw=[]}.
+	St1#state{
+	  history_raw=[],
+	  history_processed=[],
+	  data= dict:store(disorder, false, State#state.data)
+	 }.
 
 process_ds(List,State) ->
 	%Notify=State#state.sub_position,
@@ -335,17 +380,58 @@ process_ds(List,State) ->
 			  true -> State#state.history_raw;
 			  _ -> []
 		  end,
-	%PEv=case is_list(State#state.history_events) of
-	%		  true -> State#state.history_events;
-	%		  _ -> []
-	%	  end,
+	PrHist=case is_list(State#state.history_processed) of
+			  true -> State#state.history_processed;
+			  _ -> []
+		  end,
+	InCfg=case proplists:lookup(inputs,State#state.settings) of
+			  {inputs, InLst} -> InLst;
+			  _ -> []
+		  end,
+	ComprFun=fun(X, {Acc,Ovf}) ->
+					 case proplists:get_value(X#incfg.dsname,List) of
+						 undefined -> {Acc,Ovf};
+						 Val ->
+							 VFVal=fun(Val1) -> 
+										   case X#incfg.factor of
+											   1 -> Val1;
+											   undefined -> Val1;
+											   Factor -> Val1 * Factor
+										   end end,
+							 {_Overflows,OverflowsIn}=case X#incfg.type of
+														 counter ->
+															 case lists:keyfind(X#incfg.dsname,1,Ovf) of
+																 {_,Exists} -> {Exists,{X#incfg.dsname,Exists,Val}};
+																 {_,Exists,_} -> {Exists,{X#incfg.dsname,Exists,Val}};
+																 _ -> {0 ,{X#incfg.dsname,0,Val}}
+															 end;
+														 _ -> {0 ,{X#incfg.dsname,0,0}}
+													 end,
+							 NewAcc = case lists:keyfind(X#incfg.variable, 1, Acc) of
+										  false ->
+											  lists:keystore(X#incfg.variable, 1, Acc, { X#incfg.variable, VFVal(Val) });
+										  {_Name,PreVal} ->
+											  lists:keystore(X#incfg.variable, 1, Acc, { X#incfg.variable, PreVal+VFVal(Val) })
+									  end,
+							 %lager:debug("inCfg ~p Acc ~p",[X, NewAcc]),
 
-	%lager:info("Config ~p",[State#state.settings]),
-	%CurData=[{dt,T},
-	%		 {position,[Lon, Lat]},
-	%		 {dir, Dir},
-	%		 {speed,Speed}],
+							 {NewAcc,
+							  lists:keystore(X#incfg.dsname, 1, Ovf, OverflowsIn )}
+					 end
+			 end,
 
+	PrevOvf=case dict:find(svals, State#state.data) of
+				{ok, Nd} -> Nd;
+				_ -> []
+			end,
+	{SVals,SOfvs}=lists:foldl(ComprFun,{[],PrevOvf},InCfg),
+	PrData=[{dt,T},
+			 {position,[Lon, Lat]},
+			 {dir, Dir},
+			 {sp,Speed}] ++ SVals,
+	lager:debug("Car ~p Srcdata ~p",[State#state.id,List]),
+	lager:debug("Car ~p   2DUMP ~p",[State#state.id,PrData]),
+	%lager:debug("Car ~p Compr ~p ~p",[State#state.id,SVals,SOfvs]),
 
 	NewState=case T > State#state.last_ptime of
 				 true ->
@@ -362,54 +448,76 @@ process_ds(List,State) ->
 							 end,
 					 POIIn=lists:subtract(POIs,OLDPois),
 					 POIOut=lists:subtract(OLDPois,POIs),
+					 case length(POIIn)>0 of
+						 true ->
+							 saveevent(State#state.id,{ list_to_binary("poi.enter."++integer_to_list(T)), POIIn },T);
+						 _ -> ok
+					 end,
+					 case length(POIOut)>0 of
+						 true -> 
+							 saveevent(State#state.id,{ list_to_binary("poi.leave."++integer_to_list(T)), POIOut },T);
+						 _ -> ok
+					 end,
+
 					 In0=case proplists:lookup(in0,List) of
 							 {_,Float} when is_float(Float) -> round(Float*100)/100;
 							 _ -> none
 						 end,
-					 In1=case proplists:lookup(in0,List) of
+					 In1=case proplists:lookup(in1,List) of
 							 {_,Floa} when is_float(Floa) -> round(Floa*100)/100;
 							 {_,Int} when is_integer(Int) -> Int;
 							 _ -> none
 						 end,
-					 %lager:info("POI: ~p",[POIs]),
+					 %lager:info("Car ~p POI: ~p",[State#state.id,POIs]),
 					 %lager:info("Sp ~p, St ~p",[Speed, proplists:get_value(minspeed,State#state.settings,1)]),
 					 Stop=Speed < proplists:get_value(minspeed,State#state.settings,1),
+					 %lager:info("stop ~p",[dict:to_list(State#state.data)]),
 					 {LStart,LStop,LState,LProcessed} = case dict:find(startstop,State#state.data) of
-										{ok, {A,B,C} } -> {A,B,C,false};
 										{ok, {A,B,C,D} } -> {A,B,C,D};
 										_ -> case Stop of
 												 true -> {T, T, stop, false};
 												 _ -> {T, T, drive, false}
 											 end
 									end,
-					 NSSData=case {Stop == (LState == stop), Stop} of
-							   {true, true} -> %Still stopped
+					 NSSData=case {Stop == (LState == stop), Stop, LProcessed} of
+								 {true, true, _} -> %Still stopped
 									 case LProcessed of
 										 true -> 
+											 lager:info("Car ~p still stopped for ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
 											 {LStart, LStop, LState, LProcessed};
 										 false ->
 											 MStop=proplists:get_value(minstop,State#state.settings,300),
+											 lager:info("Car ~p stopped for ~p, real stop ~p",[State#state.id,T-LStop,MStop]),
 											 case T - LStop >= MStop of
 												 true -> 
-													 lager:info("Car ~p Really stopped",[State#state.id]),
+													 savestop(State#state.id,LStop,LStart,T,stop, {Lon, Lat, POIs}),
+													 lager:info("Car ~p Really stopped at ~p",[State#state.id, LStop]),
 													 {LStart, LStop, LState, true};
 												 false -> 
 													 {LStart, LStop, LState, LProcessed}
 											 end
 									 end;
-							   {true, false} -> %Still driveing
-								   {LStart, LStop, LState, false};
-							   {false, true} -> %stopped
-									 lager:info("Stop after ~p",[T-LStart]),
-								   {LStart, T, stop, false};
-							   {false, false} -> %started
-									 lager:info("Start after ~p",[T-LStop]),
-								   {T, LStop, drive, false}
+								 {true, false, _} -> %Still driveing, do nothing
+									 {LStart, LStop, LState, false};
+								 {false, true, _} -> %just stopped
+									 lager:debug("Car ~p Drived for a ~p, beginning ~p",[State#state.id,T-LStart,LStart]),
+									 lager:debug("Car ~p possible stop after ~p",[State#state.id,T-LStart]),
+									 {LStart, T, stop, false};
+								 {false, false, true} -> %just started
+									 lager:debug("Car ~p Stopped for a ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
+									 savestop(State#state.id,LStop,LStart,T,drive, {Lon, Lat, POIs}),
+									 lager:debug("Car ~p Start after ~p",[State#state.id,T-LStop]),
+									 {T, LStop, drive, false};
+								 {false, false, false} -> %started, but not fully stopped, ignore
+									 % lager:info("Car ~p Stopped for a ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
+									 lager:debug("Car ~p reStart ~p",[State#state.id,T-LStop]),
+									 {LStart, LStop, drive, false}
 						   end,
-					 lager:info("Car ~p L ~p SSData ~p",[State#state.id,LState,NSSData]),
+					 %lager:info("Car ~p L ~p PrData ~p",[State#state.id,LState,{LStart,LStop,LState,LProcessed}]),
+					 %lager:info("Car ~p L ~p SSData ~p",[State#state.id,LState,NSSData]),
 
 					 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIIn,POIOut,In0,In1,element(3,NSSData)],
-					 lager:info("dev ~p at ~p,~p (~p km/h) Pois ~p/~p in0: ~p, in1: ~p, ~p",Log),
+					 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p/~p in0: ~p, in1: ~p, ~p",Log),
 
 					 %put data into Redis
 					 Bi=integer_to_binary(State#state.id),
@@ -420,6 +528,10 @@ process_ds(List,State) ->
 												 "lng", f2b(Lon),
 												 "lat", f2b(Lat),
 												 "dir", f2b(Dir),
+												 "Start", element(1,NSSData),
+												 "Stop", element(2,NSSData),
+												 "Status", element(3,NSSData),
+												 "StatusHandled", element(4,NSSData),
 												 "spd", case Stop of 
 															true -> 0; 
 															_ -> f2b(Speed) 
@@ -432,10 +544,21 @@ process_ds(List,State) ->
 
 
 					 %send data to push stream
+					 SDir=case Dir of
+							  _ when Dir>=337.5 orelse  Dir<22.5  -> <<"N">>;
+							  _ when Dir>=22.5  andalso Dir<67.5  -> <<"NE">>;
+							  _ when Dir>=67.5  andalso Dir<112.5 -> <<"E">>;
+							  _ when Dir>=112.5 andalso Dir<157.5 -> <<"SE">>;
+							  _ when Dir>=157.5 andalso Dir<202.5 -> <<"S">>;
+							  _ when Dir>=202.5 andalso Dir<247.5 -> <<"SW">>;
+							  _ when Dir>=247.5 andalso Dir<292.5 -> <<"W">>;
+							  _ when Dir>=292.5 andalso Dir<337.5 -> <<"NW">>
+						  end,
 					 Data={struct,[
 								   {type,position},
 								   {dev,State#state.id},
 								   {dir,Dir},
+								   {sdir,SDir},
 								   {spd,Speed},
 								   {pois, POIs},
 								   {color, case Speed of
@@ -456,12 +579,20 @@ process_ds(List,State) ->
 					 State#state{
 					   cur_poi=POIs, 
 					   history_raw=PHist ++ [{T,now(),List}], 
+					   history_processed=PrHist ++ [{T,PrData}], 
 					   chour=UnixHour, 
-					   data=dict:store(startstop,NSSData,State#state.data)
+					   data=
+					   		dict:store(svals,SOfvs, 
+									   dict:store(startstop,NSSData,
+												  State#state.data
+												 )
+									  )
 					  };
 				 _ ->
 					 State#state{
 					   history_raw= lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
+					   history_processed= lists:sort(fun({A,_},{B,_})-> B>A end,PrHist ++ [{T,PrData}]), 
+					   data= dict:store(disorder, true, State#state.data), 
 					   chour=UnixHour}
 			 end,
 	dump_stat(NewState).
@@ -524,7 +655,7 @@ ds(List0, State, TTL) ->
 		  end,
 	D2=dict:store(timer,
 				  erlang:send_after(1000*Timeo, self(), {stop, normal}),
-				  State#state.data),
+				  Res#state.data),
 	D3=dict:store(last_ds,now(),D2),
 	{noreply, Res#state{data=D3}}.
 
@@ -545,11 +676,17 @@ b2ia (Bin) ->
 %			list_to_integer(L)
 %	end.
 
-processStruct({struct, X},Path,TK) ->
-	[ { b2ia(I),processStruct(P,Path++[I],TK)} || {I,P} <- X ];
-processStruct(X,Path,TK) when is_list(X) ->
-	[ { b2ia(I),processStruct(P,Path++[I],TK)} || {I,P} <- X ];
-processStruct(X,Path,TK) ->
+processStruct({struct, X},Path,TK, TK2) ->
+	processStruct(X, Path, TK, TK2);
+processStruct(X,Path,TK, TK2) when is_list(X) ->
+	Fun = fun({I,P}) ->
+				  case TK2 of
+					  undefined -> { b2ia(I),processStruct(P,Path++[I],TK, TK2)};
+					  F -> F(b2ia(I), processStruct(P,Path++[I],TK, TK2), Path)
+				  end
+		  end,
+	lists:map(Fun, X);
+processStruct(X,Path,TK, _) ->
 	case TK of
 		undefined -> X;
 		F ->
@@ -558,6 +695,7 @@ processStruct(X,Path,TK) ->
 
 decode_settings(Settings) ->
 	Fun=fun(X,Path) ->
+				%lager:debug("Process val ~p at ~p",[X,Path]),
 				case Path of 
 					[<<"minstop">>] -> 
 						binary_to_integer(X);
@@ -566,17 +704,82 @@ decode_settings(Settings) ->
 					[<<"inputs">>,_,<<"type">>] -> 
 						list_to_atom(binary_to_list(X));
 					_ ->
-						%lager:debug("Process val ~p at ~p",[X,Path]),
 						X
 				end
 		end,
+	Fun2=fun(K,X,Path) ->
+				 %lager:debug("Proc ~p ~p decode: ~p",[Path,K,X]),
+				 case {Path, K} of 
+					 {[<<"inputs">>],Num} when is_integer(Num) ->
+						 Type=proplists:get_value(type,X,gauge),
+						 Fact=proplists:get_value(factor,X,1),
+						 Ovf=proplists:get_value(ovfval,X,4294967296),
+						 In="in"++integer_to_list(Num),
+						 Var=proplists:get_value(variable,X,list_to_binary(In)),
+						 %{in, K, X};
+						 #incfg{dsname=list_to_atom(In),
+								type=Type,
+								factor=Fact,
+								variable=list_to_atom("v_"++binary_to_list(Var)),
+								ovfval=Ovf};
+					 _ -> {K,X}
+				 end
+		 end,
 	case mochijson2:decode(Settings) of
 		{struct,Arr} when is_list(Arr) ->
-			P1=processStruct(Arr,[],Fun),
+			P1=processStruct(Arr,[],Fun,Fun2),
 			lager:info("ParseSettings ~p",[P1]),
 			{ok, P1};
 		_ -> 
 			lager:info("ParseSettings error ~p",[Settings]),
 			error 
 	end.
+
+savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) -> 
+	lager:debug("Car ~p Key: ~p",[DeviceID, {type,events, device,DeviceID, hour,gpstools:floor(LStop/3600)}]),
+	StopH=gpstools:floor(LStop/3600),
+	KeyS={type,events, device,DeviceID, hour,StopH},
+	SKey = list_to_binary("stop."++integer_to_list(LStop)),
+	case Sta of
+		stop ->
+			StartH=gpstools:floor(LStart/3600),
+			RKey = list_to_binary("drive."++integer_to_list(LStart)),
+			case StartH == StopH of
+				true ->
+					%lager:info("Combine update1"),
+					mng:ins_update(<<"events">>, KeyS, {
+												   SKey,{duration, Now-LStop, fin, 0, position, [Lon, Lat], poi, POIs},
+												   RKey,{duration, Now-LStart, fin, 1}
+												  });
+				_ -> 
+					%lager:info("Split update1"),
+					KeyR={type,events, device,DeviceID, hour,StartH},
+					mng:ins_update(<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 0, position, [Lon, Lat], poi, POIs}}),
+					mng:ins_update(<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 1}})
+			end;
+		drive ->
+			NowH=gpstools:floor(Now/3600),
+			RKey = list_to_binary("drive."++integer_to_list(Now)),
+			case NowH == StopH of
+				true -> 
+					%lager:info("Combine update2"),
+					mng:ins_update(<<"events">>, KeyS, {
+												   <<SKey/binary,".duration">>, Now-LStop,
+												   <<SKey/binary,".fin">>, 1,
+												   RKey,{duration, Now-LStart, fin, 0}
+												  });
+				_ ->
+					%lager:info("Split update2"),
+					KeyR={type,events, device,DeviceID, hour, NowH},
+					mng:ins_update(<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 1}}),
+					mng:ins_update(<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 0}})
+			end;
+		_ ->
+			ok
+	end.
+
+saveevent(DeviceID, EventDescription, Now) -> 
+	Key={type,events, device,DeviceID, hour,gpstools:floor(Now/3600)},
+	lager:info("Car ~p Event: ~p, ED ~p",[DeviceID, Key, EventDescription]),
+	mng:ins_update(<<"events">>, Key, EventDescription).
 

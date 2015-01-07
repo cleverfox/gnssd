@@ -152,11 +152,11 @@ step(State0) ->
 		false -> 
 				  case Finished of 
 					  true -> 
-						  erlang:send_after(30000,self(),{wait, round(random:uniform()*10), finished});
+						  erlang:send_after(30000,self(),{wait, round(random:uniform()*10)+2, finished});
 					  _ ->
 						  case random:uniform() < 0.01 of % random stop
 							  true -> 	  
-								  erlang:send_after(5000,self(),{wait, round(random:uniform()*12), pause});
+								  erlang:send_after(5000,self(),{wait, round(random:uniform()*32), pause});
 							  _ -> 
 								  erlang:send_after(1000*Timeout,self(),{chpos, P2})
 						  end
@@ -393,6 +393,7 @@ senddata(State,Force) ->
 						  {sp,State#state.cspeed},
 						  {dt,UT},
 						  {in0,State#state.fuel},
+						  {in2,0.5},
 						  {in1,
 						   case dict:find(odometer,State#state.extra) of 
 							   {ok, TMP} -> TMP; _ -> 0

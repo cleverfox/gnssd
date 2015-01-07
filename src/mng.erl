@@ -1,5 +1,5 @@
 -module(mng).
--export([find/2,find/3,find_one/2,find_one/3,insert/2,ins_update/3,index/3,proplist2m/1,m2proplist/1]).
+-export([find/2,find/3,find_one/2,find_one/3,insert/2,ins_update/3,index/3,proplist2tom/1,proplist3tom/1,m2proplist/1]).
 
 find_one(Collection, Query) ->
 	lager:info("mFind: ~p, Args ~p",[Collection,Query]),
@@ -66,11 +66,17 @@ mongo2proplist([A, B | Rest], Arr) ->
 m2proplist(Term) ->
 	mongo2proplist(tuple_to_list(Term),[]).
 
-proplist2m(List) -> 
+proplist3tom(List) -> 
 	Fx=fun({K,V},AccIn) ->
 			   AccIn ++ [K,V]
 	   end,
 	[ list_to_tuple(lists:foldl(Fx,[],Src)) || {_,_,Src} <- List ].
+
+proplist2tom(List) -> 
+	Fx=fun({K,V},AccIn) ->
+			   AccIn ++ [K,V]
+	   end,
+	[ list_to_tuple(lists:foldl(Fx,[],Src)) || {_,Src} <- List ].
 
 
 
