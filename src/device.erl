@@ -78,7 +78,7 @@ init1(ID,Kind,OID,Settings,Hour) ->
 				 UH when is_integer(UH) -> 
 					 UH
 			 end,
-	PL=case mng:find_one(<<"rawdata">>,{type,rawdata,device,ID,hour,UnixHour}) of
+	PL=case mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,ID,hour,UnixHour}) of
 		   {Term} when is_tuple(Term) -> 
 			   mng:m2proplist(Term);
 		   _ -> []
@@ -340,7 +340,7 @@ dump_stat(State, Force) ->
 				   _ -> []
 			   end,
 			HR1=mng:proplist3tom(HR),
-			mng:ins_update(<<"rawdata">>,
+			mng:ins_update(mongo,<<"rawdata">>,
 						   {type,rawdata,
 							device,State#state.id,
 							hour,State#state.chour},
@@ -353,7 +353,7 @@ dump_stat(State, Force) ->
 				   _ -> []
 			   end,
 			PHR1=mng:proplist2tom(PHR),
-			mng:ins_update(<<"devicedata">>,
+			mng:ins_update(mongo,<<"devicedata">>,
 						   {type,devicedata,
 							device,State#state.id,
 							hour,State#state.chour},
@@ -778,15 +778,15 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 			case StartH == StopH of
 				true ->
 					%lager:info("Combine update1"),
-					mng:ins_update(<<"events">>, KeyS, {
+					mng:ins_update(mongo,<<"events">>, KeyS, {
 												   SKey,{duration, Now-LStop, fin, 0, position, [Lon, Lat], poi, POIs},
 												   RKey,{duration, Now-LStart, fin, 1}
 												  });
 				_ -> 
 					%lager:info("Split update1"),
 					KeyR={type,events, device,DeviceID, hour,StartH},
-					mng:ins_update(<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 0, position, [Lon, Lat], poi, POIs}}),
-					mng:ins_update(<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 1}})
+					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 0, position, [Lon, Lat], poi, POIs}}),
+					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 1}})
 			end;
 		drive ->
 			NowH=gpstools:floor(Now/3600),
@@ -794,7 +794,7 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 			case NowH == StopH of
 				true -> 
 					%lager:info("Combine update2"),
-					mng:ins_update(<<"events">>, KeyS, {
+					mng:ins_update(mongo,<<"events">>, KeyS, {
 												   <<SKey/binary,".duration">>, Now-LStop,
 												   <<SKey/binary,".fin">>, 1,
 												   RKey,{duration, Now-LStart, fin, 0}
@@ -802,8 +802,8 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 				_ ->
 					%lager:info("Split update2"),
 					KeyR={type,events, device,DeviceID, hour, NowH},
-					mng:ins_update(<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 1}}),
-					mng:ins_update(<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 0}})
+					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 1}}),
+					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 0}})
 			end;
 		_ ->
 			ok
@@ -812,5 +812,5 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 saveevent(DeviceID, EventDescription, Now) -> 
 	Key={type,events, device,DeviceID, hour,gpstools:floor(Now/3600)},
 	lager:info("Car ~p Event: ~p, ED ~p",[DeviceID, Key, EventDescription]),
-	mng:ins_update(<<"events">>, Key, EventDescription).
+	mng:ins_update(mongo,<<"events">>, Key, EventDescription).
 
