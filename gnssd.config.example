@@ -1,12 +1,10 @@
 [
 {gnssd, [
-	{redis, {"localhost", 6379}}, %ok
-	{'_pgsql', {"colo1db.aksinet.net","gnss","gnss",""}}, %ok
+	{redis, {"localhost", 6379}},
 	{pgsql, {{8193,1660,864,33,0,0,0,219},"gnss","gnss",""}}, %ok
 	{mongodb, {"localhost", 27017, <<"test">>}},
-		{redis_subscribe, {<<"push:*">>,<<"push:">>}},
-		{pushstream, {"http://localhost/pub?id="}},
-		{test, passed}
+	{redis_subscribe, {<<"push:*">>,<<"push:">>}},
+	{pushstream, {"http://localhost/pub?id="}}
 ]},
 {lager, [
 	{handlers, [

@@ -146,6 +146,11 @@ init([ID]) ->
 
 init([ID,Hour]) ->
 	lager:info("Staring ~p",[ID]),
+	case Hour of
+		0 -> register(list_to_atom("device_"++integer_to_list(ID)),self());
+		_ -> ok
+	end,
+
 	case psql:equery("select kind,settings,organisation_id from devices where id=$1",[ID]) of
 		{ok,_Hdr,[{Kind,Settings,OID}]} ->
 			CFG=case decode_settings(Settings) of
@@ -248,6 +253,11 @@ handle_cast({sub, SType}, State) ->
 		  end,
 	{noreply, State#state{sub_position=PSub,sub_ev=ESub2}};
 
+
+handle_cast(reg, State) ->
+	%register(list_to_atom("device_"++integer_to_list(State#state.id)),self()),
+	{noreply, State};
+
 handle_cast(reload_settings, State) ->
 	lager:info("reload ~p",[State#state.id]),
 	case psql:equery("select kind,settings from devices where id=$1",[State#state.id]) of
@@ -322,7 +332,7 @@ dump_stat(State, Force) ->
 				 {ok, {_,_,_}} = {ok, DateTime} -> DateTime
 			 end,
 	LastSec=timer:now_diff(now(),LastDump)/1000000,
-	case (Force==1) orelse (LastSec > 300) of 
+	case (Force>0) orelse (LastSec > 300) of 
 		true ->
 			lager:debug("Device ~p dumping to mongodb....",[State#state.id]),
 			HR=case State#state.history_raw of
@@ -347,8 +357,29 @@ dump_stat(State, Force) ->
 						   {type,devicedata,
 							device,State#state.id,
 							hour,State#state.chour},
-						   {data,PHR1}
-						  ),
+						   case Force == 2 of
+							   true ->
+								   {data,PHR1,eoh,true};
+							   _ -> 
+								   {data,PHR1}
+						   end ),
+			case Force == 2 of
+				true ->
+					Redis=fun(W) -> 
+								  eredis:q(W, [ "lpush", <<"process:devicedata">>, 
+												iolist_to_binary(mochijson2:encode(
+																   [
+																	{type,devicedata},
+																	{device,State#state.id},
+																	{hour,State#state.chour}
+																   ]))
+											  ])
+						  end,
+					poolboy:transaction(redis,Redis);
+				_ ->
+					ok
+			end,
+
 
 			State#state{data=dict:store(lastdump,now(),State#state.data)};
 		false -> 
@@ -357,7 +388,7 @@ dump_stat(State, Force) ->
 
 
 switch_hour(State) ->
-	St1=dump_stat(State,1),
+	St1=dump_stat(State,2),
 	lager:info("Switch hour"),
 	St1#state{
 	  history_raw=[],
