@@ -7,3 +7,4 @@ deps/*
 ebin/*
 erl_crash.dump
 log/*
+gnssd.config
