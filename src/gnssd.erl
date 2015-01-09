@@ -34,26 +34,26 @@ stop(_State) ->
 	ok.
 
 init([]) ->
-	{MHostname, MPort, MDatabase} = case application:get_env(gnssd,mongodb) of
+	{MHostname, MPort, MDatabase} = case application:get_env(mongodb) of
 						{ok, {MHost, Prt, Db}} -> 
 							{MHost, Prt, Db};
 						_ -> 
 							{"localhost",27017,"test"}
 					end,
-	{RedisHost,RedisPort} = case application:get_env(gnssd,redis) of 
+	{RedisHost,RedisPort} = case application:get_env(redis) of 
 					{ok, {RHost, RPort} } ->
 						{RHost,RPort};
 					_ ->
 						{"127.0.0.1",6379}
 				end,
-	{SubChan,StripChan} = case application:get_env(gnssd,redis_subscribe) of 
+	{SubChan,StripChan} = case application:get_env(redis_subscribe) of 
 					{ok, {XSub, XStrip} } ->
 						{XSub, XStrip};
 					_ ->
 						{<<"push:*">>,<<"push:">>}
 				end,
 
-	PS = case application:get_env(gnssd,pushstream) of 
+	PS = case application:get_env(pushstream) of 
 		     {ok, {Url} } ->
 			     Url;
 		     _ ->
