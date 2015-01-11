@@ -1,8 +1,8 @@
 [
 {gnssd, [
 	{redis, {"localhost", 6379}},
-	{pgsql, {{8193,1660,864,33,0,0,0,219},"gnss","gnss",""}}, %ok
-	{mongodb, {"localhost", 27017, <<"test">>}},
+	{pgsql, {{8193,1660,864,33,0,0,0,219},"gnss","gnss",""}},
+	{mongodb, [ {host, "100.64.0.7"}, {port, 27017}, {database, <<"test">>} ]},
 	{redis_subscribe, {<<"push:*">>,<<"push:">>}},
 	{pushstream, {"http://localhost/pub?id="}}
 ]},

@@ -353,15 +353,17 @@ dump_stat(State, Force) ->
 				   _ -> []
 			   end,
 			PHR1=mng:proplist2tom(PHR),
+			{MSec,Sec,_} = now(),
+			Time=MSec*1000000 + Sec,
 			mng:ins_update(mongo,<<"devicedata">>,
 						   {type,devicedata,
 							device,State#state.id,
 							hour,State#state.chour},
 						   case Force == 2 of
 							   true ->
-								   {data,PHR1,eoh,true};
+								   {data,PHR1,eoh,true,lastupdate,Time};
 							   _ -> 
-								   {data,PHR1}
+								   {data,PHR1,lastupdate,Time}
 						   end ),
 			case Force == 2 of
 				true ->
@@ -390,9 +392,15 @@ dump_stat(State, Force) ->
 switch_hour(State) ->
 	St1=dump_stat(State,2),
 	lager:info("Switch hour"),
+	%{LR1,LR2,LR3}=lists:last(St1#state.history_raw),
+	%Last_raw={LR1,LR2,LR3++[{prev_hour,1}]},
+	Last_raw=lists:last(St1#state.history_raw),
+	%{LP1,LP2,LP3}=lists:last(St1#state.history_processed),
+	%Last_proc={LP1,LP2,LP3++[{prev_hour,1}]},
+	Last_proc=lists:last(St1#state.history_processed),
 	St1#state{
-	  history_raw=[],
-	  history_processed=[],
+	  history_raw=[Last_raw],
+	  history_processed=[Last_proc],
 	  data= dict:store(disorder, false, State#state.data)
 	 }.
 

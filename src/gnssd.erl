@@ -11,7 +11,6 @@
 -behaviour(application).
 
 %% Application callbacks
--include("deps/mongodb/include/mongo_protocol.hrl").
 
 -export([start/0, start/2, stop/1, init/1]).
 
@@ -34,12 +33,12 @@ stop(_State) ->
 	ok.
 
 init([]) ->
-	{MHostname, MPort, MDatabase} = case application:get_env(mongodb) of
-						{ok, {MHost, Prt, Db}} -> 
-							{MHost, Prt, Db};
-						_ -> 
-							{"localhost",27017,"test"}
-					end,
+	MongoCfg = case application:get_env(mongodb) of
+				   {ok,X} when is_list(X) -> X;
+				   _ -> 
+					   lager:error("Can't get mongoDB configuration"),
+					   []
+			   end,
 	{RedisHost,RedisPort} = case application:get_env(redis) of 
 					{ok, {RHost, RPort} } ->
 						{RHost,RPort};
@@ -85,7 +84,7 @@ init([]) ->
 				     {size,3},
 				     {max_overflow,20}
 				    ],
-				    [ {MHostname,MPort,#conn_state{database=MDatabase}}, [ {database, MDatabase} ] ]
+					MongoCfg
 				   ]},
 	       permanent, 5000, worker, 
 		   [poolboy,mc_worker]
