@@ -147,7 +147,7 @@ init([ID]) ->
 init([ID,Hour]) ->
 	lager:info("Staring ~p",[ID]),
 	case Hour of
-		0 -> register(list_to_atom("device_"++integer_to_list(ID)),self());
+		0 -> catch register(list_to_atom("device_"++integer_to_list(ID)),self());
 		_ -> ok
 	end,
 
@@ -368,7 +368,15 @@ dump_stat(State, Force) ->
 			case Force == 2 of
 				true ->
 					Redis=fun(W) -> 
-								  eredis:q(W, [ "lpush", <<"process:devicedata">>, 
+								  eredis:q(W, [ "lpush", <<"aggregate:devicedata">>, 
+												iolist_to_binary(mochijson2:encode(
+																   [
+																	{type,devicedata},
+																	{device,State#state.id},
+																	{hour,State#state.chour}
+																   ]))
+											  ]),
+								  eredis:q(W, [ "publish", <<"aggregate">>, 
 												iolist_to_binary(mochijson2:encode(
 																   [
 																	{type,devicedata},
@@ -405,11 +413,6 @@ switch_hour(State) ->
 	 }.
 
 process_ds(List,State) ->
-	%Notify=State#state.sub_position,
-	Notify=case lists:keyfind(position,1,State#state.sub_ev) of
-			   {position, L} when is_list(L) -> L;
-			   _ -> []
-		   end,
 	{_,[Lon, Lat]}=proplists:lookup(position,List),
 	{_,Dir}=proplists:lookup(dir,List),
 	{_,T}=proplists:lookup(dt,List),
@@ -489,12 +492,16 @@ process_ds(List,State) ->
 					 POIOut=lists:subtract(OLDPois,POIs),
 					 case length(POIIn)>0 of
 						 true ->
-							 saveevent(State#state.id,{ list_to_binary("poi.enter."++integer_to_list(T)), POIIn },T);
+							 saveevent(State#state.id,{ 
+													 list_to_binary("poi.enter."++integer_to_list(T)), POIIn 
+													},T);
 						 _ -> ok
 					 end,
 					 case length(POIOut)>0 of
 						 true -> 
-							 saveevent(State#state.id,{ list_to_binary("poi.leave."++integer_to_list(T)), POIOut },T);
+							 saveevent(State#state.id,{
+													list_to_binary("poi.leave."++integer_to_list(T)), POIOut 
+													},T);
 						 _ -> ok
 					 end,
 
@@ -607,13 +614,21 @@ process_ds(List,State) ->
 										   end},
 								   {pos,{array,[Lon, Lat]}}
 								  ]},
-					 JSData=iolist_to_binary(mochijson2:encode(Data)),
 					 %lager:info("JS: ~p",[JSData]),
-					 Fd=fun(E) ->
-								%lager:info("Dev ~p Send notify ~p ~p",[State#state.id,E,JSData]),
-								gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
-						end,
-					 lists:foreach(Fd,Notify),
+					 {MSec,Sec,_} = now(),
+					 NowH=(MSec*1000000 + Sec)/3600,
+					 PrevH=NowH-1,
+					 NeedNotify=case UnixHour of
+									NowH -> true;
+									PrevH -> true;
+									_ -> false
+								end,
+
+					 case NeedNotify of 
+						 true -> 
+							 notifyPos(State,Data);
+						 _ -> ok
+					 end,
 
 					 State#state{
 					   cur_poi=POIs, 
@@ -636,6 +651,21 @@ process_ds(List,State) ->
 			 end,
 	dump_stat(NewState).
 
+notifyPos(State,Data) ->
+	JSData=iolist_to_binary(mochijson2:encode(Data)),
+	Fd=fun(E) ->
+			   %lager:info("Dev ~p Send notify ~p ~p",[State#state.id,E,JSData]),
+			   gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
+	   end,
+	lists:foreach(Fd,
+				  case lists:keyfind(position,1,State#state.sub_ev) of
+					  {position, L} when is_list(L) -> L;
+					  _ -> []
+				  end
+				 ),
+	ok.
+
+
 ds(List0, State, TTL) ->
 	case dict:find(timer,State#state.data) of
 		{ok, Timer} ->
@@ -656,16 +686,19 @@ ds(List0, State, TTL) ->
 						 _ -> UnixHour
 					 end,
 				NextH=CurH+1,
+				{MSec,Sec,_}=now(),
+				NextUnixHour=gpstools:floor((MSec*1000000+Sec)/3600),
+
 				case UnixHour of
-					CurH ->
+					CurH -> %current hour
 						process_ds(List,State);
-					NextH ->
+					NextH -> %next hour
 						S1=switch_hour(State),
 						process_ds(List,S1);
-					_Any when _Any > NextH ->
+					_Any when _Any > NextUnixHour -> %data from future: incorrect time from device. ignore it.
 						lager:error("Data from future!!! ~p: Current hour ~p, Data hour ~p",[State#state.id,State#state.chour, UnixHour]),
 						State;
-					_Any when _Any < CurH -> 
+					_Any when _Any < CurH -> %data from past. spawn new worker
 						case global:whereis_name({device, State#state.id, UnixHour}) of
 							undefined -> 
 								case supervisor:start_child(dev_sup,[State#state.id, UnixHour]) of
@@ -677,7 +710,10 @@ ds(List0, State, TTL) ->
 							Pid ->
 								gen_server:cast(Pid,{ds, List, TTL-1})
 						end,
-						State
+						State;
+					Hour when Hour>CurH -> %it is time to switch hour, but looks like time jump at device
+						S1=switch_hour(State),
+						process_ds(List,S1)
 				end;
 
 			FH when is_integer(FH) -> 
@@ -787,14 +823,31 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 				true ->
 					%lager:info("Combine update1"),
 					mng:ins_update(mongo,<<"events">>, KeyS, {
-												   SKey,{duration, Now-LStop, fin, 0, position, [Lon, Lat], poi, POIs},
-												   RKey,{duration, Now-LStart, fin, 1}
+												   SKey,{
+													 duration, Now-LStop, 
+													 fin, 0, 
+													 position, [Lon, Lat], 
+													 poi, POIs},
+												   RKey,{
+													 duration, Now-LStart, 
+													 fin, 1, 
+													 eposition, [Lon, Lat]
+													}
 												  });
 				_ -> 
 					%lager:info("Split update1"),
 					KeyR={type,events, device,DeviceID, hour,StartH},
-					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 0, position, [Lon, Lat], poi, POIs}}),
-					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 1}})
+					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{
+																duration, Now-LStop, 
+																fin, 0, 
+																position, [Lon, Lat], 
+																poi, POIs
+															   }}),
+					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{
+																duration, Now-LStart, 
+																fin, 1, 
+																eposition, [Lon, Lat]
+															   }})
 			end;
 		drive ->
 			NowH=gpstools:floor(Now/3600),
@@ -805,13 +858,24 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 					mng:ins_update(mongo,<<"events">>, KeyS, {
 												   <<SKey/binary,".duration">>, Now-LStop,
 												   <<SKey/binary,".fin">>, 1,
-												   RKey,{duration, Now-LStart, fin, 0}
+												   RKey,{
+													 duration, Now-LStart, 
+													 fin, 0, 
+													 position, [Lon, Lat]
+													}
 												  });
 				_ ->
 					%lager:info("Split update2"),
 					KeyR={type,events, device,DeviceID, hour, NowH},
-					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{duration, Now-LStop, fin, 1}}),
-					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{duration, Now-LStart, fin, 0}})
+					mng:ins_update(mongo,<<"events">>, KeyS, {
+														 <<SKey/binary,".duration">>, Now-LStop, 
+														 <<SKey/binary,".fin">>, 1
+														}),
+					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{
+																duration, Now-LStart, 
+																fin, 0, 
+																position, [Lon, Lat]
+															   }})
 			end;
 		_ ->
 			ok
