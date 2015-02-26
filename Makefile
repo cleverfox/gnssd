@@ -12,6 +12,7 @@ deploy:
 	-kernel inetrc '"./erl_inetrc"' \
 	-boot start_sasl -name gnssd -config gnssd.config -s lager start -s gnssd start -s sync go
 attach:
-	rlwrap --always-readline erl -name con`jot -r 1 0 100` -hidden -remsh gnssd@`hostname`
+	erl -name con`jot -r 1 0 100` -hidden -remsh gnssd@`hostname`
+	#rlwrap --always-readline 
 stop:
 	echo 'halt().' | erl -name obsrdrcon -remsh gnssd@`hostname`

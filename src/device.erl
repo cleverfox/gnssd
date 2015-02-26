@@ -13,30 +13,8 @@
          terminate/2,
          code_change/3]).
 
--record(state, {
-	  id, 
-	  fixedhour, 
-	  org_id,
-	  kind,
-	  settings, 
-	  sub_position,
-	  sub_ev,
-	  cur_poi,
-	  history_raw,
-	  history_events,
-	  history_processed,
-	  current_values,
-	  proc_plugins = [],
-	  chour,
-	  data,
-	  last_ptime
-	 }).
--record(incfg, {dsname, 
-				type,
-				factor,
-				variable, 
-				pad_empty,
-				ovfval}).
+-include("include/device.hrl").
+
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -91,7 +69,19 @@ init1(ID,Kind,OID,Settings,Hour,Recalc) ->
 	PLPD=if not Recalc -> 
 				case mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,ID,hour,UnixHour}) of
 					{Term1} when is_tuple(Term1) -> 
-						mng:m2proplist(Term1);
+						try 
+							PLpdi=mng:m2proplist(Term1),
+							case proplists:get_value(data,PLpdi) of 
+								Listpdi when is_list(Listpdi) ->
+									PLpdS0=[ mng:m2proplist(X) || X<-Listpdi ],
+									[ {proplists:get_value(dt,X),now(),X} || X<-PLpdS0 ];
+								undefined -> 
+									[]
+							end
+						catch Ex:Ey ->
+								  lager:notice("Can't parse ~p",[{Ex,Ey}]),
+								  []
+						end;
 					_ -> []
 				end;
 			true -> []
@@ -223,10 +213,6 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 
-f2b(X) when is_integer(X) ->
-       	integer_to_binary(X);
-f2b(X) when is_float(X) -> 
-	float_to_binary(X,[{decimals, 20}, compact]).
 b2i(X) when is_binary(X) ->
 	try 
 		binary_to_integer(X) 
@@ -379,11 +365,11 @@ dump_stat(State, Force) ->
 						   {raw,HR1}
 						  ),
 
-
 			PHR=case State#state.history_processed of
 				   M1 when is_list(M1) -> M1;
 				   _ -> []
 			   end,
+			%lager:info("Dump PHR ~p",[PHR]),
 			PHR1=mng:proplist2tom(PHR),
 			{MSec,Sec,_} = now(),
 			Time=MSec*1000000 + Sec,
@@ -447,7 +433,7 @@ switch_hour(State) ->
 find_raw_place(Right,Item) -> %{NewArray, PrevItem}
 	find_raw_place([], Right, Item, undefined).
 
-find_raw_place(Left,[], {Timestamp,_,_} = Item, PrevItem) -> %{NewArray, PrevItem}
+find_raw_place(Left,[], Item, PrevItem) -> %{NewArray, PrevItem}
 	{Left ++ [ Item ], PrevItem };
 
 find_raw_place(Left,[Cur|Right], {Timestamp,_,_} = Item, PrevItem) -> %{NewArray, PrevItem}
@@ -477,8 +463,13 @@ process_ds(List,State,Recalc) ->
 	UnixHour=gpstools:floor(T/3600),
 	PrepData=case {Recalc,is_list(State#state.history_raw),T > State#state.last_ptime} of
 				{true, true, _} -> %recalc. Do not change. 
-					{_,PVal1}=find_raw_place(State#state.history_raw, {T-1,now(),List}), %inefficient way.
-					{State#state.history_raw,PVal1};
+					 %inefficient way.
+					case find_raw_place(State#state.history_raw, {T-0.1,now(),List}) of
+						ignore ->
+							ignore;
+						{_,PVal1} ->
+							{State#state.history_raw,PVal1}
+					end;
 				{false, false, _} ->  %New list
 					{[{T,now(),List}],undefined};
 				{false, true, true} -> %Append to end
@@ -493,7 +484,7 @@ process_ds(List,State,Recalc) ->
 		ignore ->
 			lager:info("Device ~p ignoring dup packet T ~p",[State#state.id, T]),
 			State;
-		{PHist,PRawVal} ->
+		{PHist,PRaw} ->
 			%lager:debug("Device ~p Item ~p, prev ~p",[State#state.id, {T,now(),List}, PVal]),
 
 			PrHist=case is_list(State#state.history_processed) of
@@ -504,13 +495,15 @@ process_ds(List,State,Recalc) ->
 					  {inputs, InLst} -> InLst;
 					  _ -> []
 				  end,
-			PrevOvf=case dict:find(svals, State#state.data) of
-						{ok, Nd} -> Nd;
-						_ -> []
+			PRawVal=case PRaw of
+						undefined -> [];
+						{_,_,Prv} when is_list(Prv) -> Prv;
+						_Any -> 
+							throw({badmatch,_Any})
 					end,
 
-
-			{SVals,SOfvs}=process_variables(List, InCfg, PrevOvf),
+			SVals=process_variables(List, InCfg, PRawVal),
+			lager:info("Svals ~p",[SVals]),
 
 			PrData=[{dt,T},
 					{position,[Lon, Lat]},
@@ -521,195 +514,56 @@ process_ds(List,State,Recalc) ->
 			%lager:debug("Car ~p Compr ~p ~p",[State#state.id,SVals,SOfvs]),
 
 			NewState=case T > State#state.last_ptime of
-				 true ->
-					 POIs=case psql:equery("select id from pois where (organisation_id=$3 or organisation_id is null) and ST_Intersects(geo,st_makepoint($1,$2))",
-										   [Lon,Lat,State#state.org_id]) of
-							  {ok,_Hdr,Dat} ->
-								  [ X || {X} <- Dat ];
-							  _Any -> 
-								  []
-						  end,
-					 OLDPois=case is_list(State#state.cur_poi) of
-								 true -> State#state.cur_poi;
-								 _ -> []
-							 end,
-					 POIIn=lists:subtract(POIs,OLDPois),
-					 POIOut=lists:subtract(OLDPois,POIs),
-					 case length(POIIn)>0 of
 						 true ->
-							 saveevent(State#state.id,{ 
-													 list_to_binary("poi.enter."++integer_to_list(T)), POIIn 
-													},T);
-						 _ -> ok
-					 end,
-					 case length(POIOut)>0 of
-						 true -> 
-							 saveevent(State#state.id,{
-													 list_to_binary("poi.leave."++integer_to_list(T)), POIOut 
-													},T);
-						 _ -> ok
-					 end,
-
-					 In0=case proplists:lookup(in0,List) of
-							 {_,Float} when is_float(Float) -> round(Float*100)/100;
-							 _ -> none
-						 end,
-					 In1=case proplists:lookup(in1,List) of
-							 {_,Floa} when is_float(Floa) -> round(Floa*100)/100;
-							 {_,Int} when is_integer(Int) -> Int;
-							 _ -> none
-						 end,
-					 %lager:info("Car ~p POI: ~p",[State#state.id,POIs]),
-					 %lager:info("Sp ~p, St ~p",[Speed, proplists:get_value(minspeed,State#state.settings,1)]),
-					 Stop=Speed < proplists:get_value(minspeed,State#state.settings,1),
-					 %lager:info("stop ~p",[dict:to_list(State#state.data)]),
-					 {LStart,LStop,LState,LProcessed} = case dict:find(startstop,State#state.data) of
-															{ok, {A,B,C,D} } -> {A,B,C,D};
-															_ -> case Stop of
-																	 true -> {T, T, stop, false};
-																	 _ -> {T, T, drive, false}
-																 end
-														end,
-					 NSSData=case {Stop == (LState == stop), Stop, LProcessed} of
-								 {true, true, _} -> %Still stopped
-									 case LProcessed of
-										 true -> 
-											 lager:info("Car ~p still stopped for ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
-											 {LStart, LStop, LState, LProcessed};
-										 false ->
-											 MStop=proplists:get_value(minstop,State#state.settings,300),
-											 lager:info("Car ~p stopped for ~p, real stop ~p",[State#state.id,T-LStop,MStop]),
-											 case T - LStop >= MStop of
-												 true -> 
-													 savestop(State#state.id,LStop,LStart,T,stop, {Lon, Lat, POIs}),
-													 lager:info("Car ~p Really stopped at ~p",[State#state.id, LStop]),
-													 {LStart, LStop, LState, true};
-												 false -> 
-													 {LStart, LStop, LState, LProcessed}
-											 end
-									 end;
-								 {true, false, _} -> %Still driveing, do nothing
-									 {LStart, LStop, LState, false};
-								 {false, true, _} -> %just stopped
-									 lager:debug("Car ~p Drived for a ~p, beginning ~p",[State#state.id,T-LStart,LStart]),
-									 lager:debug("Car ~p possible stop after ~p",[State#state.id,T-LStart]),
-									 {LStart, T, stop, false};
-								 {false, false, true} -> %just started
-									 lager:debug("Car ~p Stopped for a ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
-									 savestop(State#state.id,LStop,LStart,T,drive, {Lon, Lat, POIs}),
-									 lager:debug("Car ~p Start after ~p",[State#state.id,T-LStop]),
-									 {T, LStop, drive, false};
-								 {false, false, false} -> %started, but not fully stopped, ignore
-									 % lager:info("Car ~p Stopped for a ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
-									 lager:debug("Car ~p reStart ~p",[State#state.id,T-LStop]),
-									 {LStart, LStop, drive, false}
+							 Plugins=[{pi_poi,[]},{pi_stop,[]}] ++
+							 if T > State#state.last_ptime -> % only if it's newest one
+									[{pi_display,State#state.sub_ev}];
+								true -> []
 							 end,
-					 %lager:info("Car ~p L ~p PrData ~p",[State#state.id,LState,{LStart,LStop,LState,LProcessed}]),
-					 %lager:info("Car ~p L ~p SSData ~p",[State#state.id,LState,NSSData]),
 
-					 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIIn,POIOut,In0,In1,element(3,NSSData)],
-					 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p/~p in0: ~p, in1: ~p, ~p",Log),
+							 CleanHState=#{ 
+							   id=> State#state.id,
+							   org_id=> State#state.org_id,
+							   settings => State#state.settings,
+							   praw => PRawVal
+							  },
+							 {HState,PState}=lists:foldl(
+											   fun({PI, PIParam}, {HSt,PvtSt}) ->
+													   {PvtData,HData} = 
+													   PI:ds_process(
+														 maps:get(PI,PvtSt,undefined), 
+														 List, 
+														 State#state.history_processed, 
+														 HSt,
+														 PIParam),
+													   %lager:info("Plugin ~p:~p = ~p", [PI, PIParam, HData]),
+													   {maps:put(PI,HData,HSt),maps:put(PI,PvtData,PvtSt)}
+											   end,
+											   {CleanHState, State#state.plugins_data} , Plugins), 
+							 
+							 POIs=proplists:get_value(current_poi,maps:get(pi_poi,HState,[]),[]),
+							 STOP=maps:get(pi_stop,HState,[]),
 
-					 %put data into Redis
-					 Bi=integer_to_binary(State#state.id),
-					 DevH= <<"device:lastpos:",Bi/binary>>,
-					 DevP= <<"device:cpoi:",Bi/binary>>,
-					 Redis=fun(W) -> 
-								   eredis:q(W, [ "hmset", DevH, 
-												 "lng", f2b(Lon),
-												 "lat", f2b(Lat),
-												 "dir", f2b(Dir),
-												 "Start", element(1,NSSData),
-												 "Stop", element(2,NSSData),
-												 "Status", element(3,NSSData),
-												 "StatusHandled", element(4,NSSData),
-												 "spd", case Stop of 
-															true -> 0; 
-															_ -> f2b(Speed) 
-														end,
-												 "t", T ]),
-								   eredis:q(W, [ "del", DevP ]),
-								   eredis:q(W, [ "sadd", DevP ] ++ POIs)
-						   end,
-					 poolboy:transaction(redis,Redis),
+							 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIs,proplists:get_value(status,STOP,0)],
+							 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p ~p",Log),
 
-					 {MSec,Sec,_} = now(),
-					 NowH=gpstools:floor((MSec*1000000 + Sec)/3600),
-					 PrevH=NowH-1,
-					 NeedNotify=case UnixHour of
-									NowH -> true;
-									PrevH -> true;
-									_ -> false
-								end,
-
-					 case NeedNotify of 
-						 true -> 
-							 %send data to push stream
-							 SDir=case Dir of
-									  _ when Dir>=337.5 orelse  Dir<22.5  -> <<"N">>;
-									  _ when Dir>=22.5  andalso Dir<67.5  -> <<"NE">>;
-									  _ when Dir>=67.5  andalso Dir<112.5 -> <<"E">>;
-									  _ when Dir>=112.5 andalso Dir<157.5 -> <<"SE">>;
-									  _ when Dir>=157.5 andalso Dir<202.5 -> <<"S">>;
-									  _ when Dir>=202.5 andalso Dir<247.5 -> <<"SW">>;
-									  _ when Dir>=247.5 andalso Dir<292.5 -> <<"W">>;
-									  _ when Dir>=292.5 andalso Dir<337.5 -> <<"NW">>
-								  end,
-							 Data={struct,[
-										   {type,position},
-										   {dev,State#state.id},
-										   {dir,Dir},
-										   {sdir,SDir},
-										   {spd,Speed},
-										   {pois, POIs},
-										   {color, case Speed of
-													   M when M<2 -> <<"blue">>;
-													   M when M<60 -> <<"green">>;
-													   _ -> <<"red">>
-												   end},
-										   {pos,{array,[Lon, Lat]}}
-										  ]},
-							 %lager:info("JS: ~p",[JSData]),
-							 notifyPos(State,Data);
-						 _ -> ok
-
+							 State#state{
+							   cur_poi=POIs, 
+							   plugins_data=PState,
+							   history_raw=PHist, % ++ [{T,now(),List}], 
+							   history_processed=PrHist ++ [{T,PrData}], 
+							   chour=UnixHour 
+							   %data= dict:store(svals, SOfvs, State#state.data)
+							  };
+						 _ ->
+							 State#state{
+							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
+							   history_processed= lists:sort(fun({A,_},{B,_})-> B>A end,PrHist ++ [{T,PrData}]), 
+							   data= dict:store(disorder, true, State#state.data), 
+							   chour=UnixHour}
 					 end,
-
-					 State#state{
-					   cur_poi=POIs, 
-					   history_raw=PHist, % ++ [{T,now(),List}], 
-					   history_processed=PrHist ++ [{T,PrData}], 
-					   chour=UnixHour, 
-					   data=
-					   dict:store(svals,SOfvs, 
-								  dict:store(startstop,NSSData,
-											 State#state.data
-											)
-								 )
-					  };
-				 _ ->
-					 State#state{
-					   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
-					   history_processed= lists:sort(fun({A,_},{B,_})-> B>A end,PrHist ++ [{T,PrData}]), 
-					   data= dict:store(disorder, true, State#state.data), 
-					   chour=UnixHour}
-			 end,
 	dump_stat(NewState)
 	end.
-
-notifyPos(State,Data) ->
-	JSData=iolist_to_binary(mochijson2:encode(Data)),
-	Fd=fun(E) ->
-			   %lager:info("Dev ~p Send notify ~p ~p",[State#state.id,E,JSData]),
-			   gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
-	   end,
-	lists:foreach(Fd,
-				  case lists:keyfind(position,1,State#state.sub_ev) of
-					  {position, L} when is_list(L) -> L;
-					  _ -> []
-				  end
-				 ),
-	ok.
 
 
 ds(List0, State, TTL) ->
@@ -795,14 +649,6 @@ b2ia (Bin) ->
 	lager:info("ERROR ~p",[Bin]),
 	Bin.
 
-%binary_to_number(B) -> list_to_number(binary_to_list(B)).
-%list_to_number(L) ->
-%	try list_to_float(L)
-%	catch
-%		error:badarg ->
-%			list_to_integer(L)
-%	end.
-
 processStruct({struct, X},Path,TK, TK2) ->
 	processStruct(X, Path, TK, TK2);
 processStruct(X,Path,TK, TK2) when is_list(X) ->
@@ -849,7 +695,7 @@ decode_settings(Settings) ->
 					 {[<<"inputs">>], struct} ->
 						 Type=proplists:get_value(type,X,gauge),
 						 Fact=proplists:get_value(factor,X,1),
-						 Ovf=proplists:get_value(ovfval,X,4294967296),
+						 Ovf=proplists:get_value(ovfval,X,65536),
 						 InB=proplists:get_value(in,X,<<"in0">>),
 						 In=binary_to_list(InB),
 						 %lager:debug("Proc ~p ~p decode: ~p",[Path,K,X]),
@@ -935,81 +781,6 @@ decode_settings(Settings) ->
 			error 
 	end.
 
-savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) -> 
-	lager:debug("Car ~p Key: ~p",[DeviceID, {type,events, device,DeviceID, hour,gpstools:floor(LStop/3600)}]),
-	StopH=gpstools:floor(LStop/3600),
-	KeyS={type,events, device,DeviceID, hour,StopH},
-	SKey = list_to_binary("stop."++integer_to_list(LStop)),
-	case Sta of
-		stop ->
-			StartH=gpstools:floor(LStart/3600),
-			RKey = list_to_binary("drive."++integer_to_list(LStart)),
-			case StartH == StopH of
-				true ->
-					%lager:info("Combine update1"),
-					mng:ins_update(mongo,<<"events">>, KeyS, {
-												   SKey,{
-													 duration, Now-LStop, 
-													 fin, 0, 
-													 position, [Lon, Lat], 
-													 poi, POIs},
-												   RKey,{
-													 duration, Now-LStart, 
-													 fin, 1, 
-													 eposition, [Lon, Lat]
-													}
-												  });
-				_ -> 
-					%lager:info("Split update1"),
-					KeyR={type,events, device,DeviceID, hour,StartH},
-					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{
-																duration, Now-LStop, 
-																fin, 0, 
-																position, [Lon, Lat], 
-																poi, POIs
-															   }}),
-					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{
-																duration, Now-LStart, 
-																fin, 1, 
-																eposition, [Lon, Lat]
-															   }})
-			end;
-		drive ->
-			NowH=gpstools:floor(Now/3600),
-			RKey = list_to_binary("drive."++integer_to_list(Now)),
-			case NowH == StopH of
-				true -> 
-					%lager:info("Combine update2"),
-					mng:ins_update(mongo,<<"events">>, KeyS, {
-												   <<SKey/binary,".duration">>, Now-LStop,
-												   <<SKey/binary,".fin">>, 1,
-												   RKey,{
-													 duration, Now-LStart, 
-													 fin, 0, 
-													 position, [Lon, Lat]
-													}
-												  });
-				_ ->
-					%lager:info("Split update2"),
-					KeyR={type,events, device,DeviceID, hour, NowH},
-					mng:ins_update(mongo,<<"events">>, KeyS, {
-														 <<SKey/binary,".duration">>, Now-LStop, 
-														 <<SKey/binary,".fin">>, 1
-														}),
-					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{
-																duration, Now-LStart, 
-																fin, 0, 
-																position, [Lon, Lat]
-															   }})
-			end;
-		_ ->
-			ok
-	end.
-
-saveevent(DeviceID, EventDescription, Now) -> 
-	Key={type,events, device,DeviceID, hour,gpstools:floor(Now/3600)},
-	lager:info("Car ~p Event: ~p, ED ~p",[DeviceID, Key, EventDescription]),
-	mng:ins_update(mongo,<<"events">>, Key, EventDescription).
 
 tar([],_Val) ->
 	overflow;
@@ -1031,15 +802,20 @@ prepare_tartab([[A1,B1],[A2,B2]|R]) ->
 
 
 
-process_variables1(_List, [], {Acc, Ovf}) ->
-	{Acc, Ovf};
+process_variables1(_List, _Pre, [], Acc) ->
+	Acc;
 
-process_variables1(List, [X|Rest], {Acc, Ovf}) ->
+process_variables1(List, PreRaw, [X|Rest], Acc) ->
 	case proplists:get_value(X#incfg.dsname,List) of
 		undefined -> 
-			process_variables1(List, Rest, {Acc,Ovf});
+			process_variables1(List, PreRaw, Rest, Acc);
 		Val0 ->
+			lager:info("pCounter ~p",[PreRaw]),
 			Val=case X#incfg.type of
+					{counter, Limit} ->
+						PVal0=proplists:get_value(X#incfg.dsname,PreRaw,0),
+						lager:info("Counter ~p ~p",[X#incfg.type,[PVal0,Val0]]),
+						process_counter(PVal0,Val0,Limit);
 					{bin, Off, Bits} ->
 						case Val0 of
 							_ when is_integer(Val0) ->
@@ -1051,16 +827,7 @@ process_variables1(List, [X|Rest], {Acc, Ovf}) ->
 					_ ->
 						Val0
 				end,
-			{_Ovs,OvsIn}= case X#incfg.type of
-							  {counter, Ovf} ->
-								  case lists:keyfind(X#incfg.dsname,1,Ovf) of
-									  {_,Exists} -> {Exists,{X#incfg.dsname,Exists,Val}};
-									  {_,Exists,_} -> {Exists,{X#incfg.dsname,Exists,Val}};
-									  _ -> {0 ,{X#incfg.dsname,0,Val}}
-								  end;
-							  _ -> {0 ,{X#incfg.dsname,0,0}}
-						  end,
-
+			
 			VFVal=case X#incfg.factor of
 					  1 -> Val;
 					  undefined -> Val;
@@ -1095,16 +862,27 @@ process_variables1(List, [X|Rest], {Acc, Ovf}) ->
 			%{0 ,{X#incfg.dsname,0,0}}
 			%lager:debug("inCfg ~p Acc ~p",[X, NewAcc]),
 			%
-			process_variables1(List, Rest, {NewAcc, lists:keystore(X#incfg.dsname, 1, Ovf, OvsIn )})
+			process_variables1(List, PreRaw, Rest, NewAcc)
 	end.
 
 
-process_variables(List, InCfg, PrevOvf) -> % {SVals,SOfvs}.
-	process_variables1(List, InCfg, {[],PrevOvf}).
+process_variables(List, InCfg, PreVar) -> % {SVals,SOfvs}.
+	process_variables1(List, PreVar, InCfg, []).
 
-
+process_counter(V1, V2, Limit) ->
+	case V2-V1 of
+		X when X>=0 -> X;
+		_ -> Limit-V1+V2
+	end.
 
 %%% =====[ TEST ]======
+test(counter) ->
+	lists:map(fun({V1,V2,L}) ->
+					  P=process_counter(V1,V2,L),
+					  {V1,V2,L,P}
+			  end,
+	[{10,20,65536},{50,1000,65536},{65500,100,65536},{10000,100,65536}]);
+
 test(sorter) ->
 	Src=[{100,now,[]}, {300,now,[]}, {500,now,[]}, {700,now,[]}],
 	io:format("Src ~p~n",[Src]),
