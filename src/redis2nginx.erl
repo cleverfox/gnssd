@@ -86,8 +86,8 @@ handle_call(_Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast({push,Chan,Payload}, State) ->
 	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
-	lager:debug("Push ~p:~p ~p",[Url,RC,Body]),
+	{ok,{_RC,_RH,_Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
+%	lager:info("Push ~p:~p ~p",[Url,_RC,_Body]),
 	{noreply, State};
 
 handle_cast(_Msg, State) ->
@@ -106,13 +106,17 @@ handle_cast(_Msg, State) ->
 handle_info({pmessage,_PSub,Chan,Payload,SrcPid}, State) ->
 	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
 	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
-	lager:debug("Push ~p:~p",[Url,RC,Body]),
+	lager:info("Push ~p:~p ~p",[Url,RC,Body]),
+	eredis_sub:ack_message(SrcPid),
+	{noreply, State};
+
+
+handle_info({subscribed,_PSub,SrcPid}, State) ->
 	eredis_sub:ack_message(SrcPid),
 	{noreply, State};
 
 
 handle_info(Info, State) ->
-	eredis_sub:ack_message(State#state.redispid),
 	lager:info("Info ~p",[Info]),
 	{noreply, State}.
 

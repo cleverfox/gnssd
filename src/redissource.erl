@@ -158,7 +158,7 @@ handle_info({message,_Chan,Payload,SrcPid}, State) ->
 			   {noreply, State}
 	   catch
 		   error:Err ->
-			   lager:error("Can't parse source ~p",[Err]),
+			   lager:error("Can't parse source ~p: ~p",[Err, Payload]),
 			   {noreply, State}
 	end;
 

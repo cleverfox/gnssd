@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/1, start_link/2, start_link/3, test/1 ]).
+-export([start_link/1, start_link/2, start_link/3, test/1, tar/2 ]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -495,20 +495,30 @@ process_ds(List,State,Recalc) ->
 					  {inputs, InLst} -> InLst;
 					  _ -> []
 				  end,
-			PRawVal=case PRaw of
-						undefined -> [];
-						{_,_,Prv} when is_list(Prv) -> Prv;
-						_Any -> 
-							throw({badmatch,_Any})
+			{PrevAval,PRawVal,DeltaT}=case PRaw of
+						undefined -> {[],[],null};
+						{PTime,_,Prv} when is_list(Prv) -> 
+									   PPVal=case lists:keyfind(PTime,1,PrHist) of
+												 false -> [];
+												 {_,PVl} when is_list(PVl) -> PVl;
+												 _Any -> 
+													 lager:error("Badmatch ~p",[_Any]),
+													 []
+											 end,
+									   {PPVal,Prv,T-PTime};
+								   _Any -> 
+							throw({badmatch,_Any,PRaw})
 					end,
 
-			SVals=process_variables(List, InCfg, PRawVal),
-			lager:info("Svals ~p",[SVals]),
+			SVals=process_variables(List, InCfg, PRawVal, DeltaT),
+			
 
 			PrData=[{dt,T},
 					{position,[Lon, Lat]},
 					{dir, Dir},
 					{sp,Speed}] ++ SVals,
+			%lager:info("vals ~p~n~p -> ~n~p",[DeltaT,PrevAval,PrData]),
+
 			lager:debug("Car ~p Srcdata ~p",[State#state.id,List]),
 			lager:debug("Car ~p   2DUMP ~p",[State#state.id,PrData]),
 			%lager:debug("Car ~p Compr ~p ~p",[State#state.id,SVals,SOfvs]),
@@ -522,10 +532,11 @@ process_ds(List,State,Recalc) ->
 							 end,
 
 							 CleanHState=#{ 
-							   id=> State#state.id,
-							   org_id=> State#state.org_id,
-							   settings => State#state.settings,
-							   praw => PRawVal
+							   id=> State#state.id,              %device id
+							   org_id=> State#state.org_id,      %device org id
+							   settings => State#state.settings, %device settings
+							   praw => PRawVal,                  %prev. raw data
+							   pvals => PrevAval                 %prev. aggr data
 							  },
 							 {HState,PState}=lists:foldl(
 											   fun({PI, PIParam}, {HSt,PvtSt}) ->
@@ -533,7 +544,7 @@ process_ds(List,State,Recalc) ->
 													   PI:ds_process(
 														 maps:get(PI,PvtSt,undefined), 
 														 List, 
-														 State#state.history_processed, 
+														 PrHist,
 														 HSt,
 														 PIParam),
 													   %lager:info("Plugin ~p:~p = ~p", [PI, PIParam, HData]),
@@ -653,6 +664,7 @@ processStruct({struct, X},Path,TK, TK2) ->
 	processStruct(X, Path, TK, TK2);
 processStruct(X,Path,TK, TK2) when is_list(X) ->
 	Fun = fun(IP) ->
+				  %lager:debug("Proc ~p",[IP]),
 				  case IP of 
 					  {I,P} ->
 						  %lager:info("{I,P}: {~p  , ~p}",[I,P]),
@@ -665,6 +677,12 @@ processStruct(X,Path,TK, TK2) when is_list(X) ->
 								 { b2ia(I),processStruct(P,Path++[I],TK, TK2)}
 						  end;
 					  A when is_list(A) ->
+						  A;
+					  A when is_atom(A) ->
+						  A;
+					  A when is_integer(A) ->
+						  A;
+					  A when is_float(A) ->
 						  A
 				  end
 		  end,
@@ -693,14 +711,22 @@ decode_settings(Settings) ->
 	Fun2=fun(K,X,Path) ->
 				 case {Path, K} of 
 					 {[<<"inputs">>], struct} ->
+						 %lager:info("Proc ~p ~p decode: ~p",[Path,K,X]),
 						 Type=proplists:get_value(type,X,gauge),
 						 Fact=proplists:get_value(factor,X,1),
 						 Ovf=proplists:get_value(ovfval,X,65536),
 						 InB=proplists:get_value(in,X,<<"in0">>),
 						 In=binary_to_list(InB),
-						 %lager:debug("Proc ~p ~p decode: ~p",[Path,K,X]),
 						 Var=proplists:get_value(variable,X,InB),
 						 Tab=proplists:get_value(table,X,1),
+						 Lim=case proplists:get_value(limitsd,X,[null,null]) of
+								[A,B] when 
+									(is_integer(A) orelse is_float(A) orelse A==null) andalso
+									(is_integer(B) orelse is_float(B) orelse B==null) ->
+									 {delta,A,B};
+								 _ ->
+									 undefined
+							 end,
 						 %{in, K, X};
 						 Type1=case Type of
 								   bin ->
@@ -727,6 +753,7 @@ decode_settings(Settings) ->
 											   end;
 										   _ -> 1
 									   end,
+								limits=Lim,
 								variable=list_to_atom("v_"++binary_to_list(Var))
 								%, ovfval=Ovf
 							   };
@@ -802,20 +829,36 @@ prepare_tartab([[A1,B1],[A2,B2]|R]) ->
 
 
 
-process_variables1(_List, _Pre, [], Acc) ->
+process_variables1(_List, _Pre, [], Acc, _Dt) ->
 	Acc;
 
-process_variables1(List, PreRaw, [X|Rest], Acc) ->
+process_variables1(List, PreRaw, [X|Rest], Acc, Dt) ->
 	case proplists:get_value(X#incfg.dsname,List) of
 		undefined -> 
-			process_variables1(List, PreRaw, Rest, Acc);
+			process_variables1(List, PreRaw, Rest, Acc, Dt);
 		Val0 ->
-			lager:info("pCounter ~p",[PreRaw]),
 			Val=case X#incfg.type of
 					{counter, Limit} ->
 						PVal0=proplists:get_value(X#incfg.dsname,PreRaw,0),
-						lager:info("Counter ~p ~p",[X#incfg.type,[PVal0,Val0]]),
-						process_counter(PVal0,Val0,Limit);
+						CntrDiff=process_counter(PVal0,Val0,Limit),
+						CntrRes=case X#incfg.limits of
+							undefined -> CntrDiff;
+							{delta,Min,Max} ->
+										if Dt>0 ->
+											   if (Min==null orelse CntrDiff >= Min*Dt) andalso 
+												  (Max==null orelse Max*Dt >= CntrDiff) ->
+													  CntrDiff;
+												  true ->
+													  null
+											   end;
+										   true ->
+											   CntrDiff
+										end;
+							_ -> CntrDiff
+						end,
+						lager:debug("Process counter ~p/~p ~p-~p ~p ~p -> ~p",
+								   [X#incfg.dsname, Dt, Val0, PVal0, CntrDiff, X#incfg.limits,CntrRes]),
+						CntrRes;
 					{bin, Off, Bits} ->
 						case Val0 of
 							_ when is_integer(Val0) ->
@@ -828,23 +871,28 @@ process_variables1(List, PreRaw, [X|Rest], Acc) ->
 						Val0
 				end,
 			
-			VFVal=case X#incfg.factor of
-					  1 -> Val;
-					  undefined -> Val;
-					  L when is_list(L) ->
-						  %lager:debug("Input ~w tar ~p",[X#incfg.dsname,L]),
-						  case tar(L,Val) of
-							  overflow -> null;
-							  underflow -> 0;
-							  Xi when is_integer(Xi) -> Xi;
-							  Xi when is_float(Xi) -> Xi
-						  end;
+			VFVal=case Val of
+					  null ->
+						  null;
+					  _ -> 
+						  case X#incfg.factor of
+							  1 -> Val;
+							  undefined -> Val;
+							  L when is_list(L) ->
+								  %lager:debug("Input ~w tar ~p",[X#incfg.dsname,L]),
+								  case tar(L,Val) of
+									  overflow -> null;
+									  underflow -> 0;
+									  Xi when is_integer(Xi) -> Xi;
+									  Xi when is_float(Xi) -> Xi
+								  end;
 
-					  Factor when is_integer(Factor) -> Val * Factor;
-					  Factor when is_float(Factor) -> Val * Factor;
-					  _Any -> 
-						  lager:info("Factor ~p",[_Any]),
-						  Val
+							  Factor when is_integer(Factor) -> Val * Factor;
+							  Factor when is_float(Factor) -> Val * Factor;
+							  _Any -> 
+								  lager:info("Factor ~p",[_Any]),
+								  Val
+						  end
 				  end,
 
 			NewAcc=
@@ -862,12 +910,12 @@ process_variables1(List, PreRaw, [X|Rest], Acc) ->
 			%{0 ,{X#incfg.dsname,0,0}}
 			%lager:debug("inCfg ~p Acc ~p",[X, NewAcc]),
 			%
-			process_variables1(List, PreRaw, Rest, NewAcc)
+			process_variables1(List, PreRaw, Rest, NewAcc, Dt)
 	end.
 
 
-process_variables(List, InCfg, PreVar) -> % {SVals,SOfvs}.
-	process_variables1(List, PreVar, InCfg, []).
+process_variables(List, InCfg, PreVar, Dt) -> % {SVals,SOfvs}.
+	process_variables1(List, PreVar, InCfg, [], Dt).
 
 process_counter(V1, V2, Limit) ->
 	case V2-V1 of
@@ -882,6 +930,10 @@ test(counter) ->
 					  {V1,V2,L,P}
 			  end,
 	[{10,20,65536},{50,1000,65536},{65500,100,65536},{10000,100,65536}]);
+
+test(tar) ->
+	prepare_tartab([[9,0], [220,10], [650,20], [1070,30], [1480,40], [2309,60], [2715,70], [3117,80], [3540,90], [3786,95], [4095,100]]);
+
 
 test(sorter) ->
 	Src=[{100,now,[]}, {300,now,[]}, {500,now,[]}, {700,now,[]}],
