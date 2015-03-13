@@ -11,7 +11,7 @@
 		  history_events,
 		  history_processed,
 		  current_values,
-		  proc_plugins = [],
+		  usersub = [],
 		  plugins_data = #{},
 		  chour,
 		  data,

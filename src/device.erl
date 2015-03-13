@@ -14,6 +14,7 @@
          code_change/3]).
 
 -include("include/device.hrl").
+-include("include/usersub.hrl").
 
 %%%===================================================================
 %%% API functions
@@ -54,6 +55,50 @@ init1(ID,Kind,OID,Settings,Hour,Recalc) ->
 	{ok,PSub}=esub2:device_get_sub(position,ID),
 	ESub=esub2:device_get_sub(ID),
 	lager:info("Starting worker ~p: ~p, sub ~p",[ID, Kind, PSub]),
+	Subs=try
+			{ok,_Hdr,RawSubs}=psql:equery("select d.id,u.id,u.personal_channel,e.name,e.plugin_name,e.eename,params,severity from device_events d left join events e on e.id=event_id left join users u on u.id=user_id where device_id=$1",[ID]),
+			lists:filtermap(fun({EvID,Uid,UPid,EvName,PiName,EeName,UParams,Sev}) -> 
+									B2EA=fun(Bin) when is_binary(Bin) ->
+												 BL=binary_to_list(Bin),
+												 try 
+													 list_to_existing_atom(BL)
+												 catch
+													 _:_ ->
+														 BL
+												 end;
+											(_Any) ->
+												 lager:error("I can't decode binary ~p",[_Any]),
+												 throw(null)
+										 end,
+									try 
+										case mochijson2:decode(UParams) of
+											{struct,Arr} when is_list(Arr) ->
+												UP=processStruct(Arr,[],{auto,bin},undefined),
+												{true,#usersub{
+														 evid=EvID,
+														 user_id=Uid,
+														 user_chan=UPid,
+														 ev_name=EvName,
+														 pi_name=B2EA(PiName),
+														 ee_name=B2EA(EeName),
+														 params=UP,
+														 severity=Sev
+														}}
+										end
+									catch 
+										throw:null ->
+											false;
+										Class:Error -> 
+											  lager:info("ParseEvSub error ~p:~p at ~p",[Class,Error,erlang:get_stacktrace()]),
+											  false
+									end
+							end,RawSubs)
+		 catch Class:Error ->
+				   lager:error("Can't parse subs ~p:~p",[Class,Error]),
+				   []
+		 end,
+	lager:info("Sub ~p",[Subs]),
+
 	UnixHour=case Hour of 
 				 0 -> 
 					 {MSec,Sec,_}=now(),
@@ -133,7 +178,7 @@ init1(ID,Kind,OID,Settings,Hour,Recalc) ->
 		   ok
 	end,
 
-	{ok, #state{last_ptime=LPTime,
+	{ok, #state{last_ptime=if Recalc -> 0; true -> LPTime end,
 				history_raw=PLS,
 				history_processed=PLPD,
 				history_events=gb_trees:empty(),
@@ -147,7 +192,9 @@ init1(ID,Kind,OID,Settings,Hour,Recalc) ->
 				sub_ev=ESub,
 				data=Dict3,
 				current_values=dict:new(),
-				cur_poi=[]}
+				cur_poi=[],
+				usersub=Subs
+			   }
 	}.
 
 init([ID]) ->
@@ -407,6 +454,23 @@ dump_stat(State, Force) ->
 				_ ->
 					ok
 			end,
+			lager:info("Car ~p dump",[State#state.id]),
+			if State#state.fixedhour == 0 ->
+				   DevID=integer_to_binary(State#state.id),
+				   DevH= <<"device:pdata:",DevID/binary>>,
+				   FW=fun(W)->
+							  eredis:q(W,[
+										  "setex", DevH, 86400*4,
+										  term_to_binary(State#state.plugins_data,[{compressed,9}])
+										 ]) 
+					  end,
+				   poolboy:transaction(redis,FW),
+				   ok;
+			   true -> 
+				   ok
+			end,
+
+
 
 
 			State#state{data=dict:store(lastdump,now(),State#state.data)};
@@ -416,7 +480,7 @@ dump_stat(State, Force) ->
 
 switch_hour(State) ->
 	St1=dump_stat(State,2),
-	lager:info("Switch hour"),
+	lager:info("Car ~p Switch hour ~p",[State#state.id,State#state.chour]),
 	%{LR1,LR2,LR3}=lists:last(St1#state.history_raw),
 	%Last_raw={LR1,LR2,LR3++[{prev_hour,1}]},
 	Last_raw=lists:last(St1#state.history_raw),
@@ -455,10 +519,19 @@ add_raw_item(Left, Item) ->
 process_ds(List,State) ->
 	process_ds(List,State,false).
 
-process_ds(List,State,Recalc) ->
+process_ds(List0,State,Recalc) ->
+	List=case proplists:lookup(at,List0) of
+			 {at, At} when is_integer(At) ->
+				 List0;
+			 _ ->
+				 {MSec,Sec,_}=now(),
+				 UnixTime=(MSec*1000000+Sec),
+				 List0++[{at, UnixTime}]
+		 end,
 	{_,[Lon, Lat]}=proplists:lookup(position,List),
 	{_,Dir}=proplists:lookup(dir,List),
 	{_,T}=proplists:lookup(dt,List),
+	{_,AT}=proplists:lookup(at,List),
 	{_,Speed}=proplists:lookup(sp,List),
 	UnixHour=gpstools:floor(T/3600),
 	PrepData=case {Recalc,is_list(State#state.history_raw),T > State#state.last_ptime} of
@@ -516,11 +589,12 @@ process_ds(List,State,Recalc) ->
 			PrData=[{dt,T},
 					{position,[Lon, Lat]},
 					{dir, Dir},
+					{delay, AT-T},
 					{sp,Speed}] ++ SVals,
 			%lager:info("vals ~p~n~p -> ~n~p",[DeltaT,PrevAval,PrData]),
 
-			lager:debug("Car ~p Srcdata ~p",[State#state.id,List]),
-			lager:debug("Car ~p   2DUMP ~p",[State#state.id,PrData]),
+			lager:debug("Car ~p src ~p",[State#state.id,List]),
+			lager:debug("Car ~p agg ~p",[State#state.id,PrData]),
 			%lager:debug("Car ~p Compr ~p ~p",[State#state.id,SVals,SOfvs]),
 
 			NewState=case T > State#state.last_ptime of
@@ -529,7 +603,16 @@ process_ds(List,State,Recalc) ->
 							 if T > State#state.last_ptime -> % only if it's newest one
 									[{pi_display,State#state.sub_ev}];
 								true -> []
-							 end,
+							 end ++ 
+							 case proplists:lookup(plugins,State#state.settings) of
+								 none -> [];
+								 {plugins,X} when is_list(X) -> X;
+								 _ -> []
+							 end ++ 
+							 lists:usort([  %run each configuration only once
+										  {	S#usersub.pi_name, S#usersub.params } || S <- State#state.usersub, is_atom(S#usersub.pi_name)
+										 ]),
+							 %lager:info("Car ~p S ~p ~p, delay ~p sec",[State#state.id,proplists:lookup(plugins,State#state.settings),Plugins,AT-T]),
 
 							 CleanHState=#{ 
 							   id=> State#state.id,              %device id
@@ -538,31 +621,82 @@ process_ds(List,State,Recalc) ->
 							   praw => PRawVal,                  %prev. raw data
 							   pvals => PrevAval                 %prev. aggr data
 							  },
-							 {HState,PState}=lists:foldl(
-											   fun({PI, PIParam}, {HSt,PvtSt}) ->
-													   {PvtData,HData} = 
-													   PI:ds_process(
-														 maps:get(PI,PvtSt,undefined), 
-														 List, 
-														 PrHist,
-														 HSt,
-														 PIParam),
-													   %lager:info("Plugin ~p:~p = ~p", [PI, PIParam, HData]),
-													   {maps:put(PI,HData,HSt),maps:put(PI,PvtData,PvtSt)}
-											   end,
-											   {CleanHState, State#state.plugins_data} , Plugins), 
-							 
+							 {HState,PState}=
+							 lists:foldl(
+							   fun({PI, PIParam}, {HSt,PvtSt}) ->
+									   try
+										   case PI of
+											   null ->
+												   lager:notice("Car ~p Skip unknown plugin ~p",[State#state.id,PI]),
+												   {HSt,PvtSt};
+											   _ when is_atom(PI) ->
+												   PII={PI,PIParam},
+												   PrD=maps:get(PII,PvtSt,undefined),
+												   {PvtData,HData} = 
+												   erlang:apply(PI,ds_process,[
+																			   PrD, 
+																			   PrData, 
+																			   PrHist,
+																			   HSt,
+																			   PIParam]),
+												   %lager:info("Plugin ~p(~p) = ~p", [PII, PrD, HData]),
+												   {
+													maps:put(PI,maps:get(PI,HSt,[])++HData,HSt),
+													maps:put(PII,PvtData,PvtSt)
+												   };
+											   _ ->
+												   lager:notice("Car ~p Skip unknown plugin ~p",[State#state.id,PI]),
+												   {HSt,PvtSt}
+										   end
+									   catch
+										   Class:CErr ->
+											   lager:error("Car ~p Can't run plugin ~p(~p): ~p:~p",
+														   [State#state.id,PI,PIParam, Class, CErr]),
+											   lists:map(fun(E)->
+																 lager:error("At ~p",[E])
+														 end,erlang:get_stacktrace()),
+											   {HSt,PvtSt}
+									   end
+							   end,
+							   {CleanHState, State#state.plugins_data} , Plugins), 
+							 %lager:info("HS ~p",[size(term_to_binary(PState))-size(term_to_binary(PState,[{compressed,9}]))]),
+							 %lager:debug("HS ~p",[PState]),
+
 							 POIs=proplists:get_value(current_poi,maps:get(pi_poi,HState,[]),[]),
 							 STOP=maps:get(pi_stop,HState,[]),
+							 EPrData=[
+									  {drive, proplists:get_value(status,STOP,0)}
+									 ],
 
-							 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIs,proplists:get_value(status,STOP,0)],
-							 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p ~p",Log),
+							 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIs,proplists:get_value(status,STOP,0),AT-T],
+							 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p ~p delay ~p",Log),
+
+							 %lager:info("Car ~p Starting event emitters",[State#state.id]),
+							 EES=[ S || S <- State#state.usersub, is_atom(S#usersub.ee_name) ],
+							 lists:foreach(fun(EE) ->
+												   EEN=EE#usersub.ee_name,
+												   if EEN == null -> ok;
+													  is_atom(EEN) ->
+														  try
+															  lager:debug("emitting ~p",[EE]),
+															  EEN:emit(EE, HState, PrData)
+														  catch
+															  Class:CErr ->
+																  lager:error("Car ~p Event Emitter ~p: ~p:~p",
+																			  [State#state.id,EE, Class, CErr]),
+																  lists:map(fun(E)->
+																					lager:error("At ~p",[E])
+																			end,erlang:get_stacktrace())
+														  end
+												   end
+										   end, EES),
+
 
 							 State#state{
 							   cur_poi=POIs, 
 							   plugins_data=PState,
 							   history_raw=PHist, % ++ [{T,now(),List}], 
-							   history_processed=PrHist ++ [{T,PrData}], 
+							   history_processed=PrHist ++ [{T,PrData++EPrData}], 
 							   chour=UnixHour 
 							   %data= dict:store(svals, SOfvs, State#state.data)
 							  };
@@ -651,7 +785,17 @@ b2ia (Bin) when is_binary(Bin) ->
 		X when is_integer(X) ->
 			X;
 		_Any -> 
-			list_to_atom(binary_to_list(Bin))
+			case catch binary_to_float(Bin) of
+				X when is_float(X) ->
+					X;
+				_ ->
+					L=binary_to_list(Bin),
+					try 
+						list_to_existing_atom(L)
+					catch _:_ ->
+							  L
+					end
+			end
 	end;
 b2ia (Bin) when is_atom(Bin) ->
 	Bin;
@@ -683,15 +827,49 @@ processStruct(X,Path,TK, TK2) when is_list(X) ->
 					  A when is_integer(A) ->
 						  A;
 					  A when is_float(A) ->
-						  A
+						  A;
+					  A when is_binary(A) ->
+						  b2ia(A)
 				  end
 		  end,
 	lists:map(Fun, X);
-processStruct(X,Path,TK, _) ->
+processStruct(A,Path,TK, _) ->
+	%lager:debug("Proc2 ~p ~p",[X,TK]),
 	case TK of
-		undefined -> X;
-		F ->
-			F(X,Path)
+		undefined -> A;
+		{auto,C} ->
+			if
+				is_list(A) -> A;
+				is_atom(A) -> A;
+				is_integer(A) -> A;
+				is_float(A) -> A;
+				is_binary(A) ->
+					case catch binary_to_integer(A) of
+						X when is_integer(X) -> X;
+						_ -> 
+							case catch binary_to_float(A) of
+								X when is_float(X) ->
+									X;
+								_ ->
+									L=binary_to_list(A),
+									case C of
+										bin ->
+											A;
+										eatom ->
+											try 
+												list_to_existing_atom(L)
+											catch _:_ ->
+													  L
+											end;
+										atom ->
+												list_to_atom(L);
+										list->
+												L
+									end
+							end
+					end
+			end;
+		F -> F(A,Path)
 	end.	
 
 decode_settings(Settings) ->
@@ -709,7 +887,19 @@ decode_settings(Settings) ->
 				end
 		end,
 	Fun2=fun(K,X,Path) ->
+				 %lager:debug("Proc ~p k ~p decode: ~p",[Path,K,X]),
 				 case {Path, K} of 
+					 {[], plugins} ->
+						 X1=lists:map(fun([Name,Args]) ->
+											  lager:debug("Proc ~p Args: ~p",[Name,Args]),
+											  N1=binary_to_list(Name),
+											  AName=case catch list_to_existing_atom(N1) of
+												  N2 when is_atom(N2) -> N2;
+												  _ -> N1
+											  end,
+											  {AName,processStruct(Args,Path,undefined, undefined)}
+								   end,X),
+						 {K,X1};
 					 {[<<"inputs">>], struct} ->
 						 %lager:info("Proc ~p ~p decode: ~p",[Path,K,X]),
 						 Type=proplists:get_value(type,X,gauge),
@@ -839,7 +1029,7 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Dt) ->
 		Val0 ->
 			Val=case X#incfg.type of
 					{counter, Limit} ->
-						PVal0=proplists:get_value(X#incfg.dsname,PreRaw,0),
+						PVal0=proplists:get_value(X#incfg.dsname,PreRaw,undefined),
 						CntrDiff=process_counter(PVal0,Val0,Limit),
 						CntrRes=case X#incfg.limits of
 							undefined -> CntrDiff;
@@ -917,6 +1107,8 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Dt) ->
 process_variables(List, InCfg, PreVar, Dt) -> % {SVals,SOfvs}.
 	process_variables1(List, PreVar, InCfg, [], Dt).
 
+process_counter(undefined, _V2, _Limit) ->
+	0;
 process_counter(V1, V2, Limit) ->
 	case V2-V1 of
 		X when X>=0 -> X;

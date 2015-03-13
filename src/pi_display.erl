@@ -95,7 +95,7 @@ f2b(X) when is_float(X) ->
 notifyPos(Subscribers,Data) ->
 	JSData=iolist_to_binary(mochijson2:encode(Data)),
 	Fd=fun(E) ->
-			   %lager:info("Dev ~p Send notify ~p ~p",[State#state.id,E,JSData]),
+			   %lager:info("Send notify ~p ~p",[E,JSData]),
 			   gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
 	   end,
 	lists:foreach(Fd,

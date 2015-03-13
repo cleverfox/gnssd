@@ -131,7 +131,7 @@ traverse([Cur|Rest],[Prev|Passed],Acc,AvgT,Dir) ->
 							  end
 					  end,Acc)++[{Cur#pi_fuel_pdi.dt,DxDt,Cur#pi_fuel_pdi.value}],
 	{RCnt,RSum}=lists:foldl(
-				  fun({_,Dxt},{Cnt,Sum}) ->
+				  fun({_,Dxt,_},{Cnt,Sum}) ->
 						  %lager:info("Any ~p",[Dxt]),
 						  {Cnt+1,Sum+Dxt}
 				  end,
