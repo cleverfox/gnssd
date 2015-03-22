@@ -8,3 +8,5 @@ ebin/*
 erl_crash.dump
 log/*
 gnssd.config
+*.log
+*.log.?

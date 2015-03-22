@@ -23,6 +23,8 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Params) ->  %{private permanent 
 		true ->
 			mevent:saveevent(maps:get(id,HState),{ 
 									list_to_binary("poi.enter."++integer_to_list(T)), POIIn 
+									,
+									list_to_binary("poi.list."++integer_to_list(T)), POIs 
 								   },T);
 		_ -> ok
 	end,
@@ -30,9 +32,12 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Params) ->  %{private permanent 
 		true -> 
 			mevent:saveevent(maps:get(id,HState),{
 									list_to_binary("poi.leave."++integer_to_list(T)), POIOut 
+									,
+									list_to_binary("poi.list."++integer_to_list(T)), POIs 
 								   },T);
 		_ -> ok
 	end, 
-	{POIs,[{current_poi,POIs}]}.
+	
+	{POIs,[{current_poi,POIs},{in_poi,POIIn},{out_poi,POIOut}]}.
 
 

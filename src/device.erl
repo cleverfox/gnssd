@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/1, start_link/2, start_link/3, test/1, tar/2 ]).
+-export([start_link/1, start_link/2, start_link/3, test/1, tar/2, known_atoms/0 ]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -51,52 +51,13 @@ start_link(ID, Hour, Recalc) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
+
+
 init1(ID,Kind,OID,Settings,Hour,Recalc) ->
 	{ok,PSub}=esub2:device_get_sub(position,ID),
 	ESub=esub2:device_get_sub(ID),
 	lager:info("Starting worker ~p: ~p, sub ~p",[ID, Kind, PSub]),
-	Subs=try
-			{ok,_Hdr,RawSubs}=psql:equery("select d.id,u.id,u.personal_channel,e.name,e.plugin_name,e.eename,params,severity from device_events d left join events e on e.id=event_id left join users u on u.id=user_id where device_id=$1",[ID]),
-			lists:filtermap(fun({EvID,Uid,UPid,EvName,PiName,EeName,UParams,Sev}) -> 
-									B2EA=fun(Bin) when is_binary(Bin) ->
-												 BL=binary_to_list(Bin),
-												 try 
-													 list_to_existing_atom(BL)
-												 catch
-													 _:_ ->
-														 BL
-												 end;
-											(_Any) ->
-												 lager:error("I can't decode binary ~p",[_Any]),
-												 throw(null)
-										 end,
-									try 
-										case mochijson2:decode(UParams) of
-											{struct,Arr} when is_list(Arr) ->
-												UP=processStruct(Arr,[],{auto,bin},undefined),
-												{true,#usersub{
-														 evid=EvID,
-														 user_id=Uid,
-														 user_chan=UPid,
-														 ev_name=EvName,
-														 pi_name=B2EA(PiName),
-														 ee_name=B2EA(EeName),
-														 params=UP,
-														 severity=Sev
-														}}
-										end
-									catch 
-										throw:null ->
-											false;
-										Class:Error -> 
-											  lager:info("ParseEvSub error ~p:~p at ~p",[Class,Error,erlang:get_stacktrace()]),
-											  false
-									end
-							end,RawSubs)
-		 catch Class:Error ->
-				   lager:error("Can't parse subs ~p:~p",[Class,Error]),
-				   []
-		 end,
+	Subs=get_event_subs(ID),
 	lager:info("Sub ~p",[Subs]),
 
 	UnixHour=case Hour of 
@@ -216,6 +177,15 @@ init([ID,Hour,Recalc]) ->
 			CFG=case decode_settings(Settings) of
 					{ok, C} -> 
 						lager:debug("Settings ~p",[C]),
+						DevID=integer_to_binary(ID),
+						FW=fun(W)->
+								   eredis:q(W,[
+											   "setex", <<"device:config:",DevID/binary>>, 86400*365,
+											   term_to_binary(C,[{compressed,9}])
+											  ]) 
+						   end,
+						poolboy:transaction(redis,FW),
+
 						C;
 					_ -> 
 						lager:error("Can't decode config for device ~p",[ID]),
@@ -316,15 +286,32 @@ handle_cast(reg, State) ->
 	{noreply, State};
 
 handle_cast(reload_settings, State) ->
-	lager:info("reload ~p",[State#state.id]),
+	Subs=get_event_subs(State#state.id),
+	lager:info("reload ~p ~p",[State#state.id,Subs]),
 	case psql:equery("select kind,settings from devices where id=$1",[State#state.id]) of
 		{ok,_Hdr,[{Kind,Settings}]} ->
 			case decode_settings(Settings) of
-					{ok, C} -> 
-						{noreply, State#state{settings=C,kind=Kind}};
-					_ -> 
-					{noreply, State}
-				end;
+				{ok, C} -> 
+					lager:info("Settings ~p",[C]),
+					DevID=integer_to_binary(State#state.id),
+					FW=fun(W)->
+							   eredis:q(W,[
+										   "setex", <<"device:config:",DevID/binary>>, 86400*365,
+										   term_to_binary(C,[{compressed,9}])
+										  ]) 
+					   end,
+					poolboy:transaction(redis,FW),
+
+					{noreply, State#state{
+								settings=C,
+								kind=Kind,
+								usersub=Subs
+							   }};
+				_ -> 
+					{noreply, State#state{
+								usersub=Subs
+							   }}
+			end;
 		_ -> 
 			lager:error("Can't reload settings for ~p",[State#state.id]),
 			{noreply, State}
@@ -430,25 +417,17 @@ dump_stat(State, Force) ->
 							   _ -> 
 								   {data,PHR1,lastupdate,Time}
 						   end ),
-			case Force == 2 of
+			case Force > 1 of
 				true ->
 					Redis=fun(W) -> 
-								  eredis:q(W, [ "lpush", <<"aggregate:devicedata">>, 
-												iolist_to_binary(mochijson2:encode(
-																   [
-																	{type,devicedata},
-																	{device,State#state.id},
-																	{hour,State#state.chour}
-																   ]))
-											  ]),
-								  eredis:q(W, [ "publish", <<"aggregate">>, 
-												iolist_to_binary(mochijson2:encode(
-																   [
-																	{type,devicedata},
-																	{device,State#state.id},
-																	{hour,State#state.chour}
-																   ]))
-											  ])
+								  JBin=iolist_to_binary(mochijson2:encode(
+														  [
+														   {type,devicedata},
+														   {device,State#state.id},
+														   {hour,State#state.chour}
+														  ])),
+								  eredis:q(W, [ "lpush", <<"aggregate:devicedata">>, JBin ]),
+								  eredis:q(W, [ "publish", <<"aggregate">>, JBin ])
 						  end,
 					poolboy:transaction(redis,Redis);
 				_ ->
@@ -584,18 +563,26 @@ process_ds(List0,State,Recalc) ->
 					end,
 
 			SVals=process_variables(List, InCfg, PRawVal, DeltaT),
-			
+
+			SoftVars=case dict:find(lastpos,State#state.data) of % Software Odometer
+						 {ok, [PLon,PLat]} ->
+							 {Azimut,Distance}=gpstools:sphere_inverse({PLon,PLat},{Lon,Lat}),
+							 [
+							  {softodometer,Distance*1000},
+							  {softcompass,Azimut}
+							 ];
+						 _ -> []
+					 end,
 
 			PrData=[{dt,T},
 					{position,[Lon, Lat]},
 					{dir, Dir},
 					{delay, AT-T},
-					{sp,Speed}] ++ SVals,
+					{sp,Speed}] ++ SVals ++ SoftVars,
 			%lager:info("vals ~p~n~p -> ~n~p",[DeltaT,PrevAval,PrData]),
 
 			lager:debug("Car ~p src ~p",[State#state.id,List]),
 			lager:debug("Car ~p agg ~p",[State#state.id,PrData]),
-			%lager:debug("Car ~p Compr ~p ~p",[State#state.id,SVals,SOfvs]),
 
 			NewState=case T > State#state.last_ptime of
 						 true ->
@@ -626,6 +613,9 @@ process_ds(List0,State,Recalc) ->
 							   fun({PI, PIParam}, {HSt,PvtSt}) ->
 									   try
 										   case PI of
+											   '' ->
+												   lager:notice("Car ~p Skip unknown plugin ~p",[State#state.id,PI]),
+												   {HSt,PvtSt};
 											   null ->
 												   lager:notice("Car ~p Skip unknown plugin ~p",[State#state.id,PI]),
 												   {HSt,PvtSt};
@@ -665,14 +655,15 @@ process_ds(List0,State,Recalc) ->
 							 POIs=proplists:get_value(current_poi,maps:get(pi_poi,HState,[]),[]),
 							 STOP=maps:get(pi_stop,HState,[]),
 							 EPrData=[
+									  %{poi, POIs},
 									  {drive, proplists:get_value(status,STOP,0)}
 									 ],
 
 							 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIs,proplists:get_value(status,STOP,0),AT-T],
 							 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p ~p delay ~p",Log),
 
-							 %lager:info("Car ~p Starting event emitters",[State#state.id]),
-							 EES=[ S || S <- State#state.usersub, is_atom(S#usersub.ee_name) ],
+							 EES=[ S || S <- State#state.usersub, is_atom(S#usersub.ee_name) andalso S#usersub.ee_name =/= '' ],
+							 lager:info("Car ~p Starting event emitters ~p",[State#state.id,EES]),
 							 lists:foreach(fun(EE) ->
 												   EEN=EE#usersub.ee_name,
 												   if EEN == null -> ok;
@@ -682,7 +673,7 @@ process_ds(List0,State,Recalc) ->
 															  EEN:emit(EE, HState, PrData)
 														  catch
 															  Class:CErr ->
-																  lager:error("Car ~p Event Emitter ~p: ~p:~p",
+																  lager:error("Car ~p Event Emitter error ~p: ~p:~p",
 																			  [State#state.id,EE, Class, CErr]),
 																  lists:map(fun(E)->
 																					lager:error("At ~p",[E])
@@ -697,14 +688,14 @@ process_ds(List0,State,Recalc) ->
 							   plugins_data=PState,
 							   history_raw=PHist, % ++ [{T,now(),List}], 
 							   history_processed=PrHist ++ [{T,PrData++EPrData}], 
-							   chour=UnixHour 
-							   %data= dict:store(svals, SOfvs, State#state.data)
+							   chour=UnixHour,
+							   data= dict:store(lastpos, [Lon, Lat], State#state.data)
 							  };
 						 _ ->
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
 							   history_processed= lists:sort(fun({A,_},{B,_})-> B>A end,PrHist ++ [{T,PrData}]), 
-							   data= dict:store(disorder, true, State#state.data), 
+							   data= dict:store(lastpos, [Lon, Lat], dict:store(disorder, true, State#state.data)), 
 							   chour=UnixHour}
 					 end,
 	dump_stat(NewState)
@@ -1114,6 +1105,59 @@ process_counter(V1, V2, Limit) ->
 		X when X>=0 -> X;
 		_ -> Limit-V1+V2
 	end.
+
+get_event_subs(ID) ->
+	lager:error("parse subs ~p",[ID]),
+	try 
+		{ok,_Hdr,RawSubs}=psql:equery("select d.id,u.id,u.personal_channel,e.name,e.plugin_name,e.eename,params,severity from device_events d left join events e on e.id=event_id left join users u on u.id=user_id where device_id=$1",[ID]),
+		lists:filtermap(fun({EvID,Uid,UPid,EvName,PiName,EeName,UParams,Sev}) -> 
+								B2EA=fun(Bin) when is_binary(Bin) ->
+											 BL=binary_to_list(Bin),
+											 try 
+												 list_to_existing_atom(BL)
+											 catch
+												 _:_ ->
+													 BL
+											 end;
+										(null) ->
+											 throw(null);
+										(_Any) ->
+											 lager:error("I can't decode binary ~p",[_Any]),
+											 throw(null)
+									 end,
+								try 
+									case mochijson2:decode(UParams) of
+										{struct,Arr} when is_list(Arr) ->
+											UP=processStruct(Arr,[],{auto,bin},undefined),
+											{true,#usersub{
+													 evid=EvID,
+													 user_id=Uid,
+													 user_chan=UPid,
+													 ev_name=EvName,
+													 pi_name=B2EA(PiName),
+													 ee_name=B2EA(EeName),
+													 params=UP,
+													 severity=Sev
+													}}
+									end
+								catch 
+									throw:null ->
+										false;
+									Class:Error -> 
+										lager:info("ParseEvSub error ~p:~p at ~p",[Class,Error,erlang:get_stacktrace()]),
+										false
+								end
+						end,RawSubs)
+	catch Class:Error ->
+			  lager:error("Can't parse subs ~p:~p",[Class,Error]),
+			  []
+	end.
+
+known_atoms() ->
+	[
+	 aggregators_autorun,
+	 aggregator_config
+	].
 
 %%% =====[ TEST ]======
 test(counter) ->

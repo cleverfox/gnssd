@@ -12,7 +12,7 @@
 
 %% Application callbacks
 
--export([start/0, start/2, stop/1, init/1]).
+-export([start/0, stop/0, start/2, stop/1, init/1]).
 
 -define(MAX_RESTART,    30).
 -define(MAX_TIME,      60).
@@ -25,6 +25,9 @@
 
 start() ->
 	application:ensure_all_started(gnssd).
+
+stop() ->
+	application:stop(gnssd).
 
 start(_StartType, _StartArgs) ->
 	supervisor:start_link({local, ?MODULE}, ?MODULE, []).

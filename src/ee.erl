@@ -19,7 +19,7 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 	lager:info("Car ~p event ~p(~p, ~p)",[CarID, Name, Event, ExtraData]),
 	UserIDb=integer_to_binary(Sub#usersub.user_id),
 	UserSev=integer_to_binary(Sub#usersub.severity),
-	DevH= <<"user:",UserIDb/binary,":events:",UserSev/binary>>,
+	DevH= <<"user:",UserIDb/binary,":events:",UserSev/binary,":events">>,
 	DevL= <<"user:",UserIDb/binary,":events:",UserSev/binary,":lastt">>,
 	lager:info("Car ~p event ~p",[CarID, DevH]),
 	KeepNum=10,
