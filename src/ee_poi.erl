@@ -3,9 +3,9 @@
 
 -include("include/usersub.hrl").
 
--export([emit/3]).
+-export([emit/4]).
 
-emit(Sub, HState, Current) ->
+emit(Sub, HState, Current, _Pre) ->
 	CarID=maps:get(id,HState),
 	PI_Params=Sub#usersub.params,
 	%lager:info("-----[ ~p ]-----",[?MODULE]),
@@ -30,9 +30,9 @@ emit(Sub, HState, Current) ->
 					  ),
 			[ ee:emit_event(CarID,Sub,Time,?MODULE,enter,[{poi_id,P}]) || P <- POIEnter ],
 			[ ee:emit_event(CarID,Sub,Time,?MODULE,exit,[{poi_id,P}]) || P <- POIExit ],
-			%lager:info("I am ~p ~p CP ~p",[?MODULE, POIs, CurPOI]),
-			lager:info("~p Exit ~p",[?MODULE, POIExit]),
-			lager:info("~p Enter ~p",[?MODULE, POIEnter]),
+			lager:debug("I am ~p ~p CP ~p",[?MODULE, LVar, CurPOI]),
+			lager:debug("~p Exit ~p",[?MODULE, POIExit]),
+			lager:debug("~p Enter ~p",[?MODULE, POIEnter]),
 			ok;
 
 		_ -> ok

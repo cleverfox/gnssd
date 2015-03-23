@@ -2,7 +2,8 @@
 -include("include/usersub.hrl").
 -export([emit_event/6]).
  
--callback emit(Sub :: record(usersub), HState :: map(), Current :: list(term())) -> 'ok'|tuple('error', Reason :: string()).
+%-callback emit(Sub :: record(usersub), HState :: map(), Current :: list(term())) -> 'ok'|tuple('error', Reason :: string()).
+-callback emit(Sub :: record(usersub), HState :: map(), Current :: list(term()), Prev :: term) -> 'ok'|tuple('error', Reason :: string()).
 %-callback handle(Event :: atom()) -> NextEvent :: atom().
 %-callback sync(Node :: node(), Timeout :: non_neg_integer()) -> 'ok'|tuple('error', Reason :: string()).
 

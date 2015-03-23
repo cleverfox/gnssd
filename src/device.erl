@@ -614,10 +614,8 @@ process_ds(List0,State,Recalc) ->
 									   try
 										   case PI of
 											   '' ->
-												   lager:notice("Car ~p Skip unknown plugin ~p",[State#state.id,PI]),
 												   {HSt,PvtSt};
 											   null ->
-												   lager:notice("Car ~p Skip unknown plugin ~p",[State#state.id,PI]),
 												   {HSt,PvtSt};
 											   _ when is_atom(PI) ->
 												   PII={PI,PIParam},
@@ -662,25 +660,35 @@ process_ds(List0,State,Recalc) ->
 							 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIs,proplists:get_value(status,STOP,0),AT-T],
 							 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p ~p delay ~p",Log),
 
+							 lists:foreach(fun(En)->
+												   lager:debug("Car ~p event emitters ~p",[State#state.id,En])
+										   end,State#state.usersub),
 							 EES=[ S || S <- State#state.usersub, is_atom(S#usersub.ee_name) andalso S#usersub.ee_name =/= '' ],
-							 lager:info("Car ~p Starting event emitters ~p",[State#state.id,EES]),
-							 lists:foreach(fun(EE) ->
-												   EEN=EE#usersub.ee_name,
-												   if EEN == null -> ok;
-													  is_atom(EEN) ->
-														  try
-															  lager:debug("emitting ~p",[EE]),
-															  EEN:emit(EE, HState, PrData)
-														  catch
-															  Class:CErr ->
-																  lager:error("Car ~p Event Emitter error ~p: ~p:~p",
-																			  [State#state.id,EE, Class, CErr]),
-																  lists:map(fun(E)->
-																					lager:error("At ~p",[E])
-																			end,erlang:get_stacktrace())
-														  end
-												   end
-										   end, EES),
+							 EEhSrc=case dict:find(eedata, State#state.data) of
+										{ok, EEhVal} -> EEhVal;
+										_ -> #{}
+									end,
+							 lager:debug("Car ~p Starting event emitters ~p~n    ~p",[State#state.id,EES,EEhSrc]),
+							 EEData=lists:foldl(fun(EE,EEh) ->
+														EEN=EE#usersub.ee_name,
+														if EEN == null -> ok;
+														   is_atom(EEN) ->
+															   try
+																   lager:debug("emitting ~p",[EE]),
+																   Nv=EEN:emit(EE, HState, PrData, maps:get(EE#usersub.evid,EEh,undefined)),
+																   maps:put(EE#usersub.evid,Nv,EEh)
+															   catch
+																   Class:CErr ->
+																	   lager:error("Car ~p Event Emitter error ~p: ~p:~p",
+																				   [State#state.id,EE, Class, CErr]),
+																	   lists:map(fun(E)->
+																						 lager:error("At ~p",[E])
+																				 end,erlang:get_stacktrace()),
+																	   EEh
+															   end
+														end
+												end, 
+												EEhSrc, EES),
 
 
 							 State#state{
@@ -689,7 +697,9 @@ process_ds(List0,State,Recalc) ->
 							   history_raw=PHist, % ++ [{T,now(),List}], 
 							   history_processed=PrHist ++ [{T,PrData++EPrData}], 
 							   chour=UnixHour,
-							   data= dict:store(lastpos, [Lon, Lat], State#state.data)
+							   data= dict:store(eedata, EEData,
+												dict:store(lastpos, [Lon, Lat], State#state.data)
+											   )
 							  };
 						 _ ->
 							 State#state{

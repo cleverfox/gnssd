@@ -3,9 +3,9 @@
 
 -include("include/usersub.hrl").
 
--export([emit/3]).
+-export([emit/4]).
 
-emit(Sub, HState, _Current) ->
+emit(Sub, HState, _Current, _Pre) ->
 	CarID=maps:get(id,HState),
 	PI_Params=Sub#usersub.params,
 	%lager:info("I'm ~p:emit(~p,~n~p,~n~p)",[?MODULE, Sub, HState, _Current]),
