@@ -23,17 +23,16 @@ emit(Sub, HState, _Current, _Pre) ->
 			[{XVar,XMin,XMax,_,CList}|_]=Matched,
 			case CList of
 				[{low,EvT,PrevT}] -> 
-					lager:info("I'm ~p ~p/~p/~p",[Sub#usersub.evid, XVar, XMin, XMax]),
+					lager:debug("I'm ~p ~p/~p/~p",[Sub#usersub.evid, XVar, XMin, XMax]),
 					ee:emit_event(CarID,Sub,EvT,?MODULE,low,[{since,PrevT}]);
 				[{high,EvT,PrevT}] -> 
-					lager:info("I'm ~p ~p/~p/~p",[Sub#usersub.evid, XVar, XMin, XMax]),
+					lager:debug("I'm ~p ~p/~p/~p",[Sub#usersub.evid, XVar, XMin, XMax]),
 					ee:emit_event(CarID,Sub,EvT,?MODULE,high,[{since,PrevT}]);
 				_ ->
 					ok
 			end,
-			lager:info("I'm ~p ~p",[?MODULE,CList]);
-		_ -> ok
-	end,
-	ok.
-
+			lager:debug("I'm ~p ~p",[?MODULE,CList]);
+		_ -> 
+			ok
+	end.
 

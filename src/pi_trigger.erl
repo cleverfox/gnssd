@@ -1,5 +1,7 @@
 -module(pi_trigger).
--export([ds_process/5]).
+-export([ds_process/5,separate/0]).
+
+separate() -> true.
 
 ds_process(PI_Data, Current, _Hist, HState, PI_Params) ->  
 	{dt,UnixTime}=proplists:lookup(dt,Current),

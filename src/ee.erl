@@ -34,15 +34,16 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 			{t,T},
 			{event_action,Event}
 		   ] ++ ExtraData)),
+	lager:info("**** JSD ~p ~p",[DevH,JSData]),
 	RedA=fun(W) -> 
 				 N=case eredis:q(W, 
-								 [ "lpush", DevH, JSData ]) of
+								 [ "rpush", DevH, JSData ]) of
 					   {ok, Num} when is_binary(Num) -> 
 						   binary_to_integer(Num);
 					   _ -> KeepNum+1
 				   end,
 				 if KeepNum < N -> 
-						eredis:q(W, [ "ltrim", DevH, 0, KeepNum]);
+						eredis:q(W, [ "rtrim", DevH, 0, KeepNum]);
 					true -> ok
 				 end,
 				 eredis:q(W, [ "expire", DevH, 86400*7 ]),

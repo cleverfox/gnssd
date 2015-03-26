@@ -285,9 +285,14 @@ handle_cast(reg, State) ->
 	%register(list_to_atom("device_"++integer_to_list(State#state.id)),self()),
 	{noreply, State};
 
+handle_cast(reload_subs, State) ->
+	Subs=get_event_subs(State#state.id),
+	lager:info("reload ~p subs",[State#state.id]),
+	lager:debug("Car ~p subs ~p",[State#state.id,Subs]),
+	{noreply, State#state{ usersub=Subs }};
+
 handle_cast(reload_settings, State) ->
 	Subs=get_event_subs(State#state.id),
-	lager:info("reload ~p ~p",[State#state.id,Subs]),
 	case psql:equery("select kind,settings from devices where id=$1",[State#state.id]) of
 		{ok,_Hdr,[{Kind,Settings}]} ->
 			case decode_settings(Settings) of
@@ -302,19 +307,23 @@ handle_cast(reload_settings, State) ->
 					   end,
 					poolboy:transaction(redis,FW),
 
+					lager:info("Car ~p reload settings",[State#state.id]),
 					{noreply, State#state{
 								settings=C,
 								kind=Kind,
 								usersub=Subs
 							   }};
 				_ -> 
+					lager:info("Car ~p can't decode settings",[State#state.id]),
 					{noreply, State#state{
 								usersub=Subs
 							   }}
 			end;
 		_ -> 
 			lager:error("Can't reload settings for ~p",[State#state.id]),
-			{noreply, State}
+			{noreply, State#state{
+						usersub=Subs
+					   }}
 	end;
 
 handle_cast(_Msg, State) ->
@@ -407,7 +416,7 @@ dump_stat(State, Force) ->
 			PHR1=mng:proplist2tom(PHR),
 			{MSec,Sec,_} = now(),
 			Time=MSec*1000000 + Sec,
-			mng:ins_update(mongo,<<"devicedata">>,
+			IUID=mng:ins_update(mongo,<<"devicedata">>,
 						   {type,devicedata,
 							device,State#state.id,
 							hour,State#state.chour},
@@ -417,6 +426,7 @@ dump_stat(State, Force) ->
 							   _ -> 
 								   {data,PHR1,lastupdate,Time}
 						   end ),
+			lager:info("Car ~p InsUp ~p",[State#state.id,mng:id2hex(IUID)]),
 			case Force > 1 of
 				true ->
 					Redis=fun(W) -> 
@@ -452,7 +462,12 @@ dump_stat(State, Force) ->
 
 
 
-			State#state{data=dict:store(lastdump,now(),State#state.data)};
+			State#state{data=dict:store(lastdump,now(),
+										dict:store(mngid,IUID,
+												   State#state.data
+												  )
+									   )
+					   };
 		false -> 
 			State
 	end.
@@ -586,6 +601,29 @@ process_ds(List0,State,Recalc) ->
 
 			NewState=case T > State#state.last_ptime of
 						 true ->
+							 UserPIlst=lists:usort([
+													{ S#usersub.pi_name, S#usersub.params } || 
+													S <- State#state.usersub,
+													is_atom(S#usersub.pi_name) andalso S#usersub.pi_name =/= '' andalso S#usersub.pi_name =/= null
+												   ]),
+%							 UserPI=maps:to_list(lists:foldl(
+%													fun({PIn,PIp},Acc) ->
+%															maps:put(PIn,maps:get(PIn,Acc,[])++[PIp],Acc)
+%													end,maps:new(),UserPIlst)),
+							 {UserPI2h,UserPI2l}=lists:foldl(
+										fun({PIn,PIp},{Acc,LAcc}) ->
+												Sep=try
+														erlang:apply(PIn,separate,[])
+													catch 
+														_:_ -> false
+													end,
+												if Sep==true ->
+													   {Acc,LAcc++[{PIn,PIp}]};
+												   true ->
+													   {maps:put(PIn,maps:get(PIn,Acc,[])++[PIp],Acc),LAcc}
+												end
+										end,{maps:new(),[]},UserPIlst),
+
 							 Plugins=[{pi_poi,[]},{pi_stop,[]}] ++
 							 if T > State#state.last_ptime -> % only if it's newest one
 									[{pi_display,State#state.sub_ev}];
@@ -593,49 +631,55 @@ process_ds(List0,State,Recalc) ->
 							 end ++ 
 							 case proplists:lookup(plugins,State#state.settings) of
 								 none -> [];
-								 {plugins,X} when is_list(X) -> X;
+								 {plugins,X} when is_list(X) -> 
+									 lists:filter(fun(Xi) when is_atom(Xi) -> true;
+													 (_) -> false
+												  end, X);
 								 _ -> []
 							 end ++ 
-							 lists:usort([  %run each configuration only once
-										  {	S#usersub.pi_name, S#usersub.params } || S <- State#state.usersub, is_atom(S#usersub.pi_name)
-										 ]),
+							 maps:to_list(UserPI2h) ++ UserPI2l,
+							%lists:usort([  %run each configuration only once
+							%			  {	S#usersub.pi_name, S#usersub.params } || S <- State#state.usersub, is_atom(S#usersub.pi_name) andalso pi_name =/= '' andalso pi_name =/= null
+							%			 ]),
+
+
+							 %lager:info("Car ~p PIP ~n PIP ~p ~n PIPh ~p ~n PIPl ~p",
+							 %[ State#state.id, UserPI, maps:to_list(UserPI2h), UserPI2l ]),
+
 							 %lager:info("Car ~p S ~p ~p, delay ~p sec",[State#state.id,proplists:lookup(plugins,State#state.settings),Plugins,AT-T]),
 
 							 CleanHState=#{ 
 							   id=> State#state.id,              %device id
 							   org_id=> State#state.org_id,      %device org id
 							   settings => State#state.settings, %device settings
+							   data => State#state.data,         %temporary values
 							   praw => PRawVal,                  %prev. raw data
+							   chour => UnixHour,				 %current hour
 							   pvals => PrevAval                 %prev. aggr data
 							  },
 							 {HState,PState}=
 							 lists:foldl(
-							   fun({PI, PIParam}, {HSt,PvtSt}) ->
+							   fun({PI, PIParam}, {HSt,PvtSt}) when is_atom(PI) ->
 									   try
-										   case PI of
-											   '' ->
-												   {HSt,PvtSt};
-											   null ->
-												   {HSt,PvtSt};
-											   _ when is_atom(PI) ->
-												   PII={PI,PIParam},
-												   PrD=maps:get(PII,PvtSt,undefined),
-												   {PvtData,HData} = 
-												   erlang:apply(PI,ds_process,[
-																			   PrD, 
-																			   PrData, 
-																			   PrHist,
-																			   HSt,
-																			   PIParam]),
-												   %lager:info("Plugin ~p(~p) = ~p", [PII, PrD, HData]),
-												   {
-													maps:put(PI,maps:get(PI,HSt,[])++HData,HSt),
-													maps:put(PII,PvtData,PvtSt)
-												   };
-											   _ ->
-												   lager:notice("Car ~p Skip unknown plugin ~p",[State#state.id,PI]),
-												   {HSt,PvtSt}
-										   end
+										   Sep=try erlang:apply(PI,separate,[])
+											   catch _:_ -> false
+											   end,
+										   PII=if Sep -> {PI,PIParam};
+												  true -> {PI}
+											   end,
+										   PrD=maps:get(PII,PvtSt,undefined),
+										   {PvtData,HData} = 
+										   erlang:apply(PI,ds_process,[
+																	   PrD, 
+																	   PrData, 
+																	   PrHist,
+																	   HSt,
+																	   PIParam]),
+										   lager:debug("Car ~p Run Plugin ~p(~p) = ~p", [State#state.id, PII, PIParam, HData]),
+										   {
+											maps:put(PI,maps:get(PI,HSt,[])++HData,HSt),
+											maps:put(PII,PvtData,PvtSt)
+										   }
 									   catch
 										   Class:CErr ->
 											   lager:error("Car ~p Can't run plugin ~p(~p): ~p:~p",
@@ -644,7 +688,10 @@ process_ds(List0,State,Recalc) ->
 																 lager:error("At ~p",[E])
 														 end,erlang:get_stacktrace()),
 											   {HSt,PvtSt}
-									   end
+									   end;
+								  ({PI, _PIParam}, {HSt,PvtSt}) ->
+									   lager:error("Car ~p Can't find plugin ~p", [State#state.id,PI]),
+									   {HSt,PvtSt}
 							   end,
 							   {CleanHState, State#state.plugins_data} , Plugins), 
 							 %lager:info("HS ~p",[size(term_to_binary(PState))-size(term_to_binary(PState,[{compressed,9}]))]),

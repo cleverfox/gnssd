@@ -123,6 +123,11 @@ init([]) ->
 	       permanent, 2000, worker,
 	       [poolboy,pgsql_worker,epgsql]
 	   },
+	   {   devnotify,
+	       {devnotify,start_link, [ RedisHost,RedisPort, <<"device_changed">> ] }, 
+	       permanent, 2000, worker,
+	       []
+	   },
 	   {   device_sup,
 	       {dev_sup,start_link, [ ] },
 	       permanent, 2000, supervisor, []

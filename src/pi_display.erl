@@ -1,5 +1,7 @@
 -module(pi_display).
--export([ds_process/4,ds_process/5]).
+-export([ds_process/4,ds_process/5, separate/0]).
+
+separate() -> 0.
 
 ds_process(PI_Data, Current, Hist, HState) ->  %{private permanent data, public temporary data proplist}
 	ds_process(PI_Data, Current, Hist, HState, []).

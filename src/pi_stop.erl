@@ -1,5 +1,7 @@
 -module(pi_stop).
--export([ds_process/4,ds_process/5]).
+-export([ds_process/4,ds_process/5,separate/0]).
+
+separate() -> 0.
 
 ds_process(PI_Data, Current, Hist, HState) ->  %{private permanent data, public temporary data proplist}
 	ds_process(PI_Data, Current, Hist, HState, []).
@@ -28,16 +30,16 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 				{true, true, _} -> %Still stopped
 					case LProcessed of
 						true -> 
-							lager:info("Car ~p still stopped for ~p, stopped ~p",[ID,T-LStop,LStop]),
+							lager:debug("Car ~p still stopped for ~p, stopped ~p",[ID,T-LStop,LStop]),
 							{LStart, LStop, LState, LProcessed};
 						false ->
-							lager:info("Stop ~p",[PI_Data]),
+							lager:debug("Stop ~p",[PI_Data]),
 							MStop=proplists:get_value(minstop,Settings,300),
-							lager:info("Car ~p stopped for ~p, real stop ~p",[ID,T-LStop,MStop]),
+							lager:debug("Car ~p stopped for ~p, real stop ~p",[ID,T-LStop,MStop]),
 							case T - LStop >= MStop of
 								true -> 
 									savestop(ID,LStop,LStart,T,stop, {Lon, Lat, POIs}),
-									lager:info("Car ~p Really stopped at ~p",[ID, LStop]),
+									lager:debug("Car ~p Really stopped at ~p",[ID, LStop]),
 									{LStart, LStop, LState, true};
 								false -> 
 									{LStart, LStop, LState, LProcessed}
@@ -55,7 +57,7 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 					lager:debug("Car ~p Start after ~p",[ID,T-LStop]),
 					{T, LStop, drive, false};
 				{false, false, false} -> %started, but not fully stopped, ignore
-					% lager:info("Car ~p Stopped for a ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
+					% lager:debug("Car ~p Stopped for a ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
 					lager:debug("Car ~p reStart ~p",[ID,T-LStop]),
 					{LStart, LStop, drive, false}
 			end,

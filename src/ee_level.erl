@@ -16,26 +16,32 @@ emit(Sub, HState, Current, Prev) ->
 			CurVal=proplists:get_value(Var,Current,0),
 			Low=proplists:get_value(low,Sub#usersub.params,null),
 			High=proplists:get_value(high,Sub#usersub.params,null),
-			NewVal=case CurVal of 
+			{NewVal,R}=case CurVal of 
 					   M when is_integer(M) orelse is_float(M) ->
 						   LOK=Low  == null orelse M>= Low,
 						   HOK=High == null orelse High >= M,
+						   Rv=if
+								  Low =/= null andalso M<Low -> low;
+								  High =/= null andalso M>=High -> high;
+								  true -> normal
+							  end,
+						   
 						   if HOK andalso LOK ->
-								  true;
+								  {true,Rv};
 							  true ->
-								  false
+								  {false,Rv}
 						   end;
 					   _ ->  %undefined, or something other
-						   false
+							   {false, undefined}
 				   end,
-			lager:info("level ~p: ~p = ~p, lim ~p ~p. ~p -> ~p",[Time, Var, CurVal, Low, High, Prev, NewVal]),
-			if NewVal =/= Prev ->
-				   ee:emit_event(CarID,Sub,Time,?MODULE,NewVal,[]);
+			lager:debug("level ~p: ~p = ~p, lim ~p ~p. ~p -> ~p",[Time, Var, CurVal, Low, High, Prev, NewVal]),
+			if R =/= Prev ->
+				   ee:emit_event(CarID,Sub,Time,?MODULE, NewVal,[ { value, R } ]);
 			   true ->
 				   ok
 			end,
 
-			NewVal;
+			R;
 		_ -> 
 			Prev
 	end.

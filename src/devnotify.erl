@@ -1,9 +1,9 @@
--module(redis2nginx).
+-module(devnotify).
 
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/4]).
+-export([start_link/3]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -13,7 +13,7 @@
          terminate/2,
          code_change/3]).
 
--record(state, {redispid,url,chan,strip}).
+-record(state, {redispid, chan}).
 
 %%%===================================================================
 %%% API functions
@@ -26,8 +26,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Host, Port, Chan, Url) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Host, Port, Chan, Url], []).
+start_link(Host, Port, Chan) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [Host, Port, Chan], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -44,17 +44,12 @@ start_link(Host, Port, Chan, Url) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Host, Port, {Chan, Strip}, Url]) ->
+init([Host, Port, Chan]) ->
 	{ok, Pid} = eredis_sub:start_link(Host, Port, ""),
 	lager:info("Eredis up ~p: ~p:~p",[Pid,Host,Port]),
 	eredis_sub:controlling_process(Pid),
-	eredis_sub:psubscribe(Pid, [Chan]),
-	lager:info("Eredis up ~p subscribe ~p",[Pid,Chan]),
-	Url2=case is_binary(Url) of
-		     true -> Url;
-		     _ -> list_to_binary(Url)
-	     end,
-	{ok, #state{redispid=Pid,url=Url2,chan=Chan,strip=Strip}}.
+	eredis_sub:subscribe(Pid, [Chan]),
+	{ok, #state{redispid=Pid,chan=Chan}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -84,12 +79,6 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({push,Chan,Payload}, State) ->
-	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{_RC,_RH,_Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
-	lager:debug("Push ~p:~p ~p",[Url,_RC,_Body]),
-	{noreply, State};
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -103,22 +92,57 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({pmessage,_PSub,Chan,Payload,SrcPid}, State) ->
-	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
-	lager:info("Push ~p:~p ~p",[Url,RC,Body]),
+handle_info({message,Chan,Payload,SrcPid}, State) ->
+	lager:info("Got message ~p",[Payload]),
+	if Chan == State#state.chan ->
+		   case Payload of 
+			   <<"config:",DevID/binary>>  ->
+				   case bin2device(DevID) of
+					   undefined ->
+						   ok;
+					   M ->
+						   lager:info("Casting ~p",[M]),
+						   gen_server:cast(M, reload_settings),
+						   ok
+				   end;
+			   <<"event_sub:",DevsIDs/binary>>  ->
+				   lists:foreach(fun(DevID) ->
+										 case bin2device(DevID) of
+											 undefined ->
+												 ok;
+											 M ->
+												 lager:info("Casting ~p",[M]),
+												 gen_server:cast(M, reload_subs),
+												 ok
+										 end
+								 end,
+								 binary:split(DevsIDs,[<<",">>],[global])
+								), 
+				   ok;
+			   _ ->
+				   ok
+		   end;
+	   true ->
+		   ok
+	end,
 	eredis_sub:ack_message(SrcPid),
 	{noreply, State};
 
-
-handle_info({subscribed,_PSub,SrcPid}, State) ->
+handle_info({subscribed,_Chan,SrcPid}, State) ->
 	eredis_sub:ack_message(SrcPid),
 	{noreply, State};
-
 
 handle_info(Info, State) ->
 	lager:info("Info ~p",[Info]),
 	{noreply, State}.
+
+bin2device(Bin) ->
+	try 
+		I=binary_to_integer(Bin),
+		list_to_existing_atom("device_"++integer_to_list(I))
+	catch _:_ ->
+			  undefined
+	end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -148,6 +172,5 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-%%%
-escape_payload(Payload) ->
-	binary:replace(Payload,<<"\"">>,<<"\\\"">>,[global]).
+
+
