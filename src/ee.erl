@@ -23,7 +23,7 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 	DevH= <<"user:",UserIDb/binary,":events:",UserSev/binary,":events">>,
 	DevL= <<"user:",UserIDb/binary,":events:",UserSev/binary,":lastt">>,
 	lager:info("Car ~p event ~p",[CarID, DevH]),
-	KeepNum=10,
+	KeepNum=50,
 
 	JSData=iolist_to_binary(mochijson2:encode(
 		   [
@@ -32,6 +32,7 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 			{type,event},
 			{dev,CarID},
 			{t,T},
+			{severity,UserSev},
 			{event_action,Event}
 		   ] ++ ExtraData)),
 	lager:info("**** JSD ~p ~p",[DevH,JSData]),
@@ -43,7 +44,7 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 					   _ -> KeepNum+1
 				   end,
 				 if KeepNum < N -> 
-						eredis:q(W, [ "rtrim", DevH, 0, KeepNum]);
+						eredis:q(W, [ "ltrim", DevH, -KeepNum, -1 ]);
 					true -> ok
 				 end,
 				 eredis:q(W, [ "expire", DevH, 86400*7 ]),

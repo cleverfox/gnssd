@@ -33,6 +33,23 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 	{_,Speed}=proplists:lookup(sp,Current),
 	{_,Dir}=proplists:lookup(dir,Current),
 
+	Sensors=lists:filtermap(fun({K,V}) when is_atom(K) ->
+									LK=atom_to_list(K),
+									case LK of
+										[$v,$_|_] when is_float(V) -> 
+											{true,[list_to_binary(LK),float_to_binary(V, [{decimals, 4}, compact])]};
+										[$v,$_|_] when is_integer(V) -> 
+											{true,[list_to_binary(LK),integer_to_binary(V)]};
+										[$v,$_|_] when is_list(V) -> 
+											{true,[list_to_binary(LK),list_to_binary(V)]};
+										[$v,$_|_] when is_binary(V) -> 
+											{true,[list_to_binary(LK),V]};
+										_ ->
+											false
+									end;
+							   (_) -> false
+							end,Current),
+	%lager:info("C ~p",[Sensors]),
 	STOP=maps:get(pi_stop,HState,[]),
 	POIs=proplists:get_value(current_poi,maps:get(pi_poi,HState,[]),[]),
 	Bi=integer_to_binary(maps:get(id,HState)),
@@ -51,7 +68,7 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 										   true -> 0; 
 										   _ -> f2b(Speed) 
 									   end,
-								"t", T ]),
+								"t", T ] ++ lists:flatten(Sensors) ),
 				  eredis:q(W, [ "del", DevP ]),
 				  eredis:q(W, [ "sadd", DevP ] ++ POIs)
 		  end,
@@ -60,14 +77,14 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 	
 	%send data to push stream
 	SDir=case Dir of
-			 _ when Dir>=337.5 orelse  Dir<22.5  -> <<"N">>;
-			 _ when Dir>=22.5  andalso Dir<67.5  -> <<"NE">>;
-			 _ when Dir>=67.5  andalso Dir<112.5 -> <<"E">>;
-			 _ when Dir>=112.5 andalso Dir<157.5 -> <<"SE">>;
-			 _ when Dir>=157.5 andalso Dir<202.5 -> <<"S">>;
-			 _ when Dir>=202.5 andalso Dir<247.5 -> <<"SW">>;
-			 _ when Dir>=247.5 andalso Dir<292.5 -> <<"W">>;
-			 _ when Dir>=292.5 andalso Dir<337.5 -> <<"NW">>
+			 _ when Dir>=337.5 orelse  Dir<22.5  -> <<"↑"/utf8>>;
+			 _ when Dir>=22.5  andalso Dir<67.5  -> <<"↗"/utf8>>;
+			 _ when Dir>=67.5  andalso Dir<112.5 -> <<"→"/utf8>>;
+			 _ when Dir>=112.5 andalso Dir<157.5 -> <<"↘"/utf8>>;
+			 _ when Dir>=157.5 andalso Dir<202.5 -> <<"↓"/utf8>>;
+			 _ when Dir>=202.5 andalso Dir<247.5 -> <<"↙"/utf8>>;
+			 _ when Dir>=247.5 andalso Dir<292.5 -> <<"←"/utf8>>;
+			 _ when Dir>=292.5 andalso Dir<337.5 -> <<"↖"/utf8>>
 		 end,
 	Data={struct,[
 				  {type,position},
@@ -107,5 +124,4 @@ notifyPos(Subscribers,Data) ->
 				  end
 				 ),
 	ok.
-
 

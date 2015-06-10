@@ -36,8 +36,20 @@ stop(_State) ->
 	ok.
 
 init([]) ->
+	MongoWrk = case application:get_env(mongo_workers) of
+				   {ok,X4} when is_integer(X4) -> X4;
+				   _ -> 10
+			   end,
+	RedisWrk = case application:get_env(redis_workers) of
+				   {ok,X2} when is_integer(X2) -> X2;
+				   _ -> 10
+			   end,
+	PgWrk = case application:get_env(pgsql_workers) of
+				   {ok,X1} when is_integer(X1) -> X1;
+				   _ -> 10
+			   end,
 	MongoCfg = case application:get_env(mongodb) of
-				   {ok,X} when is_list(X) -> X;
+				   {ok,X3} when is_list(X3) -> X3;
 				   _ -> 
 					   lager:error("Can't get mongoDB configuration"),
 					   []
@@ -70,7 +82,7 @@ init([]) ->
 	       {poolboy,start_link,[
 				    [{name,{local,redis}},
 				     {worker_module,eredis},
-				     {size,3},
+				     {size,RedisWrk},
 				     {max_overflow,20}
 				    ],
 				    [ {host, RedisHost}, 
@@ -84,7 +96,7 @@ init([]) ->
 	       {poolboy,start_link,[
 				    [{name,{local,mongo}},
 				     {worker_module,mc_worker},
-				     {size,3},
+				     {size,MongoWrk},
 				     {max_overflow,20}
 				    ],
 					MongoCfg
@@ -96,7 +108,7 @@ init([]) ->
 	       {poolboy,start_link,[
 				    [{name,{local,postgres}},
 				     {worker_module,pgsql_worker},
-				     {size,5},
+				     {size,PgWrk},
 				     {max_overflow,20}
 				    ]
 				   ]},
@@ -112,6 +124,11 @@ init([]) ->
 	       {redissource,start_link, [ RedisHost,RedisPort, <<"source">> ] }, 
 	       permanent, 2000, worker,
 	       [poolboy,pgsql_worker,epgsql]
+	   },
+	   {   flogger,
+	       {flogger,start_link, []}, 
+	       permanent, 2000, worker,
+	       []
 	   },
 	   {   erlsource,
 	       {erlsource,start_link, [ ] }, 
@@ -131,7 +148,17 @@ init([]) ->
 	   {   device_sup,
 	       {dev_sup,start_link, [ ] },
 	       permanent, 2000, supervisor, []
+	   },
+	   {   recalculator_sup,
+	       {recalculator_sup,start_link, [ ] },
+	       permanent, 2000, supervisor, []
+	   },
+	   {   recalculator_dispatcher,
+	       {recalculator_dispatcher,start_link, [ RedisHost, RedisPort, "recalc" ] },
+	       permanent, 2000, worker, []
 	   }
+
+	   %
 %,
 %	   {   generator_sup,
 %	       {generator_sup,start_link, [ ] },

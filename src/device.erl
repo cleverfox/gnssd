@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/1, start_link/2, start_link/3, test/1, tar/2, known_atoms/0 ]).
+-export([start_link/1, start_link/2, start_link/3, test/1, tar/2, known_atoms/0, get_init_hdata/3, prepare_tartab/1 ]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -52,47 +52,111 @@ start_link(ID, Hour, Recalc) ->
 %% @end
 %%--------------------------------------------------------------------
 
+get_init_hdata(ID,CHour,Fixed) ->
+	DevID=integer_to_binary(ID),
+	Hour=integer_to_binary(CHour),
+	DevH= <<"device:hdata:",DevID/binary,":",Hour/binary>>,
+	DevHp= <<"device:hdata:",DevID/binary>>,
+	RF=fun(W)->
+			   case eredis:q(W,[ "get", DevH ]) of
+				   {ok, undefined} ->
+					   if Fixed ->
+							  none;
+						  true ->
+							  case eredis:q(W,[ "get", DevHp ]) of
+								  {ok, undefined} -> none;
+								  {ok, X} when is_binary(X) -> X;
+								  _ -> none
+							  end
+					   end;
+				   {ok, X} when is_binary(X) -> X;
+				   _ -> none
+			   end
+	   end,
+	case poolboy:transaction(redis,RF) of
+		none -> [];
+		Bin when is_binary(Bin) ->
+			try 
+				binary_to_term(Bin,[safe])
+			catch 
+				_:_ ->
+					lager:error("Can't decode redis data car ~p hour ~p",
+								[ID, CHour])
+			end
+	end. 
 
-init1(ID,Kind,OID,Settings,Hour,Recalc) ->
+
+init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 	{ok,PSub}=esub2:device_get_sub(position,ID),
 	ESub=esub2:device_get_sub(ID),
-	lager:info("Starting worker ~p: ~p, sub ~p",[ID, Kind, PSub]),
 	Subs=get_event_subs(ID),
-	lager:info("Sub ~p",[Subs]),
+	%lager:info("Sub ~p",[Subs]),
 
 	UnixHour=case Hour of 
 				 0 -> 
 					 {MSec,Sec,_}=now(),
-					 gpstools:floor((MSec*1000000+Sec)/3600);
+					 trunc((MSec*1000000+Sec)/3600);
 				 UH when is_integer(UH) -> 
 					 UH
 			 end,
+	HD=get_init_hdata(ID,UnixHour-1, if Recalc == false -> false; true -> true end  ),
+	%lager:info("hdata ~p",[proplists:get_value(last_raw,HD,none)]),
+	
 	PL=case mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,ID,hour,UnixHour}) of
-		   {Term} when is_tuple(Term) -> 
-			   mng:m2proplist(Term);
-		   _ -> []
-	   end,
-	PLPD=if not Recalc -> 
-				case mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,ID,hour,UnixHour}) of
-					{Term1} when is_tuple(Term1) -> 
-						try 
-							PLpdi=mng:m2proplist(Term1),
-							case proplists:get_value(data,PLpdi) of 
-								Listpdi when is_list(Listpdi) ->
-									PLpdS0=[ mng:m2proplist(X) || X<-Listpdi ],
-									[ {proplists:get_value(dt,X),now(),X} || X<-PLpdS0 ];
-								undefined -> 
-									[]
-							end
-						catch Ex:Ey ->
-								  lager:notice("Can't parse ~p",[{Ex,Ey}]),
-								  []
-						end;
-					_ -> []
-				end;
-			true -> []
-		 end,
-	{LPTime, PLS, CHour, Dict}=case proplists:get_value(raw,PL) of 
+		{Term} when is_tuple(Term) -> 
+			mng:m2proplist(Term);
+		{} -> 
+			case mng:find_one(mongo,<<"rawdata">>,{type,rawdata,imei,IMEI,hour,UnixHour}) of
+				{Term} when is_tuple(Term) -> 
+					lager:info("Case 2 found"),
+					mng:update(mongo,<<"rawdata">>,
+							   {type,rawdata,imei,IMEI,hour,UnixHour},
+							   {device, ID}),
+					mng:m2proplist(Term);
+				_ -> []
+			end;
+
+		_ -> []
+	end,
+	lager:info("PL ~p",[PL]),
+	PLPDs=if Recalc==false -> 
+				 SrcData=case mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,ID,hour,UnixHour}) of
+							 {Term1} when is_tuple(Term1) -> 
+								 Term1;
+							 _ -> [] %proplists:get_value(last_processed,HD,[])
+						 end,
+				 try 
+					 PLpdi=mng:m2proplist(SrcData),
+					 case proplists:get_value(data,PLpdi) of 
+						 Listpdi when is_list(Listpdi) ->
+							 PLpdS0=[ mng:m2proplist(X) || X<-Listpdi ],
+							 [ {proplists:get_value(dt,X),X} || X<-PLpdS0 ];
+						 undefined -> 
+							 []
+					 end
+				 catch Ex:Ey ->
+						   lager:notice("Can't parse ~p ~p",[{Ex,Ey},SrcData]),
+						   []
+				 end;
+				 true -> []
+		  end,
+	PLPD=case proplists:get_value(last_processed,HD,none) of
+			 {XpT,XpL} ->
+				 case PLPDs of 
+					 [] ->
+						 [{XpT,XpL}];
+					 [{XpT,_}|_] ->
+						 [];
+					 [_|_] ->
+						 [{XpT,XpL}]
+				 end;
+			 _ -> []
+		 end ++ PLPDs,
+	Dict=proplists:get_value(data,HD,dict:new()),
+
+	
+
+	{LPTime, PLS2, CHour, Dict1}=case proplists:get_value(raw,PL) of 
 							 List when is_list(List) ->
 								 PLS0=[ mng:m2proplist(X) || X<-List ],
 								 MaxTime=lists:foldl(fun(Arr,Ai)-> 
@@ -105,41 +169,60 @@ init1(ID,Kind,OID,Settings,Hour,Recalc) ->
 																 _ -> Ai 
 															 end 
 													 end, 0, PLS0),
-								 PLS1=[ {proplists:get_value(dt,X),now(),X} || X<-PLS0 ],
-								 D1=dict:store(lastdump,now(),dict:new()),
+								 PLS1=[ {proplists:get_value(dt,X),X} || X<-PLS0 ],
+								 D1=dict:store(lastdump,now(),Dict),
 								 {MaxTime, PLS1, UnixHour, D1};
 							 undefined -> 
-								 {0, [], 0, dict:new()}
+								 {0, [], 0, Dict}
 						 end,
+	
 	Dict2=dict:store(timeout,
 			case Hour of 
 				 0 -> 1800;
 				 _ -> 300
-			end, Dict),
-	Dict3=case poolboy:transaction(redis,
-							 fun(W)->
-									 eredis:q(W,[
-												 "hmget",
-												 "device:lastpos:"++integer_to_list(ID),
-												 "Start",
-												 "Stop",
-												 "Status",
-												 "StatusHandled"
-												]) end) of
-			  {ok,[Sta,Sto,Stt,Han]} when is_binary(Sta) andalso is_binary(Sto) andalso is_binary(Stt) andalso is_binary(Han) -> 
-				  dict:store(startstop, {b2i(Sta), b2i(Sto), b2a(Stt), b2a(Han) } , Dict2);
-			  _ -> 
-				  Dict2 
-			end,
+			end, Dict1),
+	Dict3= case dict:is_key(startstop, Dict2) of
+			   true ->
+				   Dict2;
+			   false ->
+				   case poolboy:transaction(redis,
+											fun(W)->
+													eredis:q(W,[
+																"hmget",
+																"device:lastpos:"++integer_to_list(ID),
+																"Start",
+																"Stop",
+																"Status",
+																"StatusHandled"
+															   ]) end) of
+					   {ok,[Sta,Sto,Stt,Han]} when is_binary(Sta) andalso is_binary(Sto) andalso is_binary(Stt) andalso is_binary(Han) -> 
+						   dict:store(startstop, {b2i(Sta), b2i(Sto), b2a(Stt), b2a(Han) } , Dict2);
+					   _ -> 
+						   Dict2 
+				   end
+		   end,
 
 	%lager:info("Standup ~p",[dict:to_list(Dict3)]),
-	if Recalc ->
+	if Recalc==true ->
 		   self() ! recalc_begin;
 	   true ->
 		   ok
 	end,
 
-	{ok, #state{last_ptime=if Recalc -> 0; true -> LPTime end,
+	PLS= case proplists:get_value(last_raw,HD,none) of
+			 {XlT,XlL} ->
+				 case PLS2 of 
+					 [] ->
+						 [{XlT,XlL}];
+					 [{XlT,_}|_] ->
+						 [];
+					 [_|_] ->
+						 [{XlT,XlL}]
+				 end;
+			 _ -> []
+		 end ++ PLS2,
+
+	State=#state{last_ptime=if Recalc=/=false -> 0; true -> LPTime end,
 				history_raw=PLS,
 				history_processed=PLPD,
 				history_events=gb_trees:empty(),
@@ -153,10 +236,26 @@ init1(ID,Kind,OID,Settings,Hour,Recalc) ->
 				sub_ev=ESub,
 				data=Dict3,
 				current_values=dict:new(),
+				plugins_data = proplists:get_value(plugins_data,HD,#{}),
 				cur_poi=[],
 				usersub=Subs
-			   }
-	}.
+				},
+	case Recalc of
+		sync ->
+			lager:info("sync dev ~p hour ~p cnt ~p",[ID,CHour,length(State#state.history_raw)]),
+			S1=lists:foldl(fun({Ut,X},St) ->
+								   case trunc(Ut/3600)<State#state.chour of
+									   true -> 
+										   St;
+									   _ -> 
+										   process_ds(X,St, true)
+								   end
+						   end, State, State#state.history_raw),
+			dump_stat(S1,2),
+			done;
+		false -> 
+			{ok, State}
+	end.
 
 init([ID]) ->
 	init([ID,0,false]);
@@ -165,15 +264,16 @@ init([ID,Hour]) ->
 	init([ID,Hour,false]);
 
 init([ID,Hour,Recalc]) ->
-	lager:info("Staring ~p",[ID]),
+	lager:info("Starting worker ~p: h ~p ~s",[ID, Hour, Recalc]),
+
 	lager:md([{worker,device},{module,?MODULE},{device_id,ID}]),
 	case Hour of
 		0 -> catch register(list_to_atom("device_"++integer_to_list(ID)),self());
 		_ -> ok
 	end,
 
-	case psql:equery("select kind,settings,organisation_id from devices where id=$1",[ID]) of
-		{ok,_Hdr,[{Kind,Settings,OID}]} ->
+	case psql:equery("select kind,settings,organisation_id,imei from devices where id=$1",[ID]) of
+		{ok,_Hdr,[{Kind,Settings,OID,IMEI}]} ->
 			CFG=case decode_settings(Settings) of
 					{ok, C} -> 
 						lager:debug("Settings ~p",[C]),
@@ -191,7 +291,7 @@ init([ID,Hour,Recalc]) ->
 						lager:error("Can't decode config for device ~p",[ID]),
 						 []
 				end,
-			init1(ID,Kind,OID,CFG,Hour,Recalc);
+			init1(ID,Kind,OID,CFG,Hour,Recalc, IMEI);
 		_ -> 
 			{error, cant_start}
 	end.
@@ -341,9 +441,14 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(recalc_begin, State) ->
-	S1=lists:foldl(fun({_Ut,_Gt,X},St) ->
-%						   lager:debug("PDS: ~p",[X]),
-						   process_ds(X,St, true)
+	S1=lists:foldl(fun({Ut,X},St) ->
+						   lager:info("P1 ~p H ~p",[trunc(Ut/3600),State#state.chour]),
+						   case trunc(Ut/3600)<State#state.chour of
+							   true -> 
+								   St;
+							   _ -> 
+								   process_ds(X,St, true)
+						   end
 				end, State, State#state.history_raw),
 	S2=dump_stat(S1,1),
 	{stop, normal, S2};
@@ -400,13 +505,14 @@ dump_stat(State, Force) ->
 				   M when is_list(M) -> M;
 				   _ -> []
 			   end,
-			HR1=mng:proplist3tom(HR),
-			mng:ins_update(mongo,<<"rawdata">>,
+			HR1=mng:proplist2tom(HR),
+			_MngRes=mng:ins_update(mongo,<<"rawdata">>,
 						   {type,rawdata,
 							device,State#state.id,
 							hour,State#state.chour},
-						   {raw,HR1}
+						   {raw,HR1,done,1}
 						  ),
+			%lager:info("HR1 ~p = ~p",[HR1,MngRes]),
 
 			PHR=case State#state.history_processed of
 				   M1 when is_list(M1) -> M1;
@@ -426,7 +532,7 @@ dump_stat(State, Force) ->
 							   _ -> 
 								   {data,PHR1,lastupdate,Time}
 						   end ),
-			lager:info("Car ~p InsUp ~p",[State#state.id,mng:id2hex(IUID)]),
+			lager:debug("Car ~p InsUp ~p",[State#state.id,mng:id2hex(IUID)]),
 			case Force > 1 of
 				true ->
 					Redis=fun(W) -> 
@@ -443,21 +549,49 @@ dump_stat(State, Force) ->
 				_ ->
 					ok
 			end,
-			lager:info("Car ~p dump",[State#state.id]),
-			if State#state.fixedhour == 0 ->
-				   DevID=integer_to_binary(State#state.id),
-				   DevH= <<"device:pdata:",DevID/binary>>,
-				   FW=fun(W)->
-							  eredis:q(W,[
-										  "setex", DevH, 86400*4,
-										  term_to_binary(State#state.plugins_data,[{compressed,9}])
-										 ]) 
-					  end,
-				   poolboy:transaction(redis,FW),
-				   ok;
-			   true -> 
-				   ok
+			lager:debug("Car ~p dump",[State#state.id]),
+
+			%Save hour state
+			Term=[
+				  {data,State#state.data},
+				  {plugins_data,State#state.plugins_data},
+				  {last_ptime,State#state.last_ptime}
+				 ] 
+			++
+			case State#state.history_raw of
+				[] ->
+					[];
+				Ls when is_list(Ls) ->
+					[{last_raw,lists:last(Ls)}]
+			end
+			++
+			case State#state.history_processed of
+				[] ->
+					[];
+				Ls when is_list(Ls) ->
+					[{last_processed,lists:last(Ls)}]
 			end,
+
+			FW=fun(W)->
+					   DevID=integer_to_binary(State#state.id),
+					   Hour=integer_to_binary(State#state.chour),
+					   DevH= <<"device:hdata:",DevID/binary,":",Hour/binary>>,
+					   eredis:q(W,[
+								   "setex", DevH, 7200,
+								   term_to_binary(Term,[{compressed,9}])
+								  ]),
+					   if State#state.fixedhour == 0 ->
+							  DevHp= <<"device:hdata:",DevID/binary>>,
+							  eredis:q(W,[
+										  "setex", DevHp, 86400*4,
+										  term_to_binary(Term,[{compressed,9}])
+										 ]);
+						  true -> 
+							  ok
+					   end
+			   end,
+			poolboy:transaction(redis,FW),
+
 
 
 
@@ -494,6 +628,16 @@ find_raw_place(Right,Item) -> %{NewArray, PrevItem}
 find_raw_place(Left,[], Item, PrevItem) -> %{NewArray, PrevItem}
 	{Left ++ [ Item ], PrevItem };
 
+find_raw_place(Left,[Cur|Right], {Timestamp,_} = Item, PrevItem) -> %{NewArray, PrevItem}
+	{T,_}=Cur,
+	if T > Timestamp ->
+		   {Left ++ [ Item, Cur | Right ], PrevItem };
+	   T == Timestamp -> 
+		   ignore;
+	   true ->
+		   find_raw_place(Left ++ [Cur], Right, Item, Cur)
+	end;
+
 find_raw_place(Left,[Cur|Right], {Timestamp,_,_} = Item, PrevItem) -> %{NewArray, PrevItem}
 	{T,_,_}=Cur,
 	if T > Timestamp ->
@@ -514,6 +658,7 @@ process_ds(List,State) ->
 	process_ds(List,State,false).
 
 process_ds(List0,State,Recalc) ->
+	try 
 	List=case proplists:lookup(at,List0) of
 			 {at, At} when is_integer(At) ->
 				 List0;
@@ -527,11 +672,11 @@ process_ds(List0,State,Recalc) ->
 	{_,T}=proplists:lookup(dt,List),
 	{_,AT}=proplists:lookup(at,List),
 	{_,Speed}=proplists:lookup(sp,List),
-	UnixHour=gpstools:floor(T/3600),
+	UnixHour=trunc(T/3600),
 	PrepData=case {Recalc,is_list(State#state.history_raw),T > State#state.last_ptime} of
 				{true, true, _} -> %recalc. Do not change. 
 					 %inefficient way.
-					case find_raw_place(State#state.history_raw, {T-0.1,now(),List}) of
+					case find_raw_place(State#state.history_raw, {T-0.1,List}) of
 						ignore ->
 							ignore;
 						{_,PVal1} ->
@@ -540,9 +685,9 @@ process_ds(List0,State,Recalc) ->
 				{false, false, _} ->  %New list
 					{[{T,now(),List}],undefined};
 				{false, true, true} -> %Append to end
-					add_raw_item(State#state.history_raw, {T,now(),List});
+					add_raw_item(State#state.history_raw, {T,List});
 				{false, true, false} -> %Insert to middle
-					find_raw_place(State#state.history_raw, {T,now(),List})
+					find_raw_place(State#state.history_raw, {T,List})
 					%lists:sort(fun({A,_,_},{B,_,_})-> B>A end,
 					%			State#state.history_raw ++ [{T,now(),List}]
 					%		   )
@@ -564,10 +709,11 @@ process_ds(List0,State,Recalc) ->
 				  end,
 			{PrevAval,PRawVal,DeltaT}=case PRaw of
 						undefined -> {[],[],null};
-						{PTime,_,Prv} when is_list(Prv) -> 
+						{PTime,Prv} when is_list(Prv) -> 
 									   PPVal=case lists:keyfind(PTime,1,PrHist) of
 												 false -> [];
 												 {_,PVl} when is_list(PVl) -> PVl;
+												 {_,_,PVl} when is_list(PVl) -> PVl;
 												 _Any -> 
 													 lager:error("Badmatch ~p",[_Any]),
 													 []
@@ -580,12 +726,17 @@ process_ds(List0,State,Recalc) ->
 			SVals=process_variables(List, InCfg, PRawVal, DeltaT),
 
 			SoftVars=case dict:find(lastpos,State#state.data) of % Software Odometer
+						 {ok, [0,0]} -> []; %skip if prev coords invalid;
 						 {ok, [PLon,PLat]} ->
-							 {Azimut,Distance}=gpstools:sphere_inverse({PLon,PLat},{Lon,Lat}),
-							 [
-							  {softodometer,Distance*1000},
-							  {softcompass,Azimut}
-							 ];
+							 if Lon == 0 andalso Lat == 0 ->
+									[];
+								true ->
+									{Azimut,Distance}=gpstools:sphere_inverse({PLon,PLat},{Lon,Lat}),
+									[
+									 {softodometer,Distance*1000},
+									 {softcompass,Azimut}
+									]
+							 end;
 						 _ -> []
 					 end,
 
@@ -604,7 +755,9 @@ process_ds(List0,State,Recalc) ->
 							 UserPIlst=lists:usort([
 													{ S#usersub.pi_name, S#usersub.params } || 
 													S <- State#state.usersub,
-													is_atom(S#usersub.pi_name) andalso S#usersub.pi_name =/= '' andalso S#usersub.pi_name =/= null
+													is_atom(S#usersub.pi_name) andalso 
+													S#usersub.pi_name =/= '' andalso 
+													S#usersub.pi_name =/= null
 												   ]),
 %							 UserPI=maps:to_list(lists:foldl(
 %													fun({PIn,PIp},Acc) ->
@@ -705,7 +858,7 @@ process_ds(List0,State,Recalc) ->
 									 ],
 
 							 Log=[State#state.id,round(Lon*10000)/10000,round(Lat*10000)/10000,round(Speed),POIs,proplists:get_value(status,STOP,0),AT-T],
-							 lager:info("Car ~p at ~p,~p (~p km/h) Pois ~p ~p delay ~p",Log),
+							 lager:debug("Car ~p at ~p,~p (~p km/h) Pois ~p ~p delay ~p",Log),
 
 							 lists:foreach(fun(En)->
 												   lager:debug("Car ~p event emitters ~p",[State#state.id,En])
@@ -749,13 +902,28 @@ process_ds(List0,State,Recalc) ->
 											   )
 							  };
 						 _ ->
+							 lager:error("PR ~p",[PrHist]),
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
-							   history_processed= lists:sort(fun({A,_},{B,_})-> B>A end,PrHist ++ [{T,PrData}]), 
+							   history_processed= lists:sort(fun 
+																 ({A,_},{B,_})-> B>A;
+																 ({A,_,_},{B,_,_})-> B>A 
+															 end,PrHist ++ [{T,PrData}]
+												   ), 
 							   data= dict:store(lastpos, [Lon, Lat], dict:store(disorder, true, State#state.data)), 
 							   chour=UnixHour}
 					 end,
 	dump_stat(NewState)
+	end
+	
+	catch
+		GClass:GErr ->
+			lager:error("Car ~p ds error: ~p:~p",
+						[State#state.id, GClass, GErr]),
+			lists:map(fun(E)->
+							  lager:error("At ~p",[E])
+					  end,erlang:get_stacktrace()),
+			{noreply, dump_stat(State)}
 	end.
 
 
@@ -770,7 +938,7 @@ ds(List0, State, TTL) ->
 	%	lager:info("Worker ~p got datasource ~p",[State#state.id,List0]),
 	List=[ {case K of B when is_binary(B) -> list_to_atom(binary_to_list(B)); _-> K end,V} || {K,V} <- List0 ],
 	{_,T}=proplists:lookup(dt,List),
-	UnixHour=gpstools:floor(T/3600),
+	UnixHour=trunc(T/3600),
 	Res=case State#state.fixedhour of
 			0 ->
 				CurH=case State#state.chour of
@@ -780,7 +948,7 @@ ds(List0, State, TTL) ->
 					 end,
 				NextH=CurH+1,
 				{MSec,Sec,_}=now(),
-				NextUnixHour=gpstools:floor((MSec*1000000+Sec)/3600),
+				NextUnixHour=trunc((MSec*1000000+Sec)/3600),
 
 				case UnixHour of
 					CurH -> %current hour
@@ -987,7 +1155,13 @@ decode_settings(Settings) ->
 											   case Tab of
 												   1 -> 1;
 												   _ when is_list(Tab) ->
-													   prepare_tartab(Tab)
+													   try
+														   prepare_tartab(Tab)
+													   catch Tc:Te ->
+																 lager:error("Can't prepare tartab ~p:~p ~p",
+																			 [Tc,Te,Tab]),
+																 0
+													   end
 											   end;
 										   _ -> 1
 									   end,
@@ -1062,8 +1236,13 @@ tar([{A1,A2,B1,K}|R],Val) ->
 prepare_tartab([])  -> []; %impossible
 prepare_tartab([_]) -> [];
 prepare_tartab([[A1,B1],[A2,B2]|R]) ->
-	K=(B2-B1)/(A2-A1),
-	[{A1,A2,B1,K}] ++ prepare_tartab([[A2,B2]|R]).
+	case A2-A1 of
+		0 ->
+			[];
+		Td ->
+			K=(B2-B1)/Td,
+			[{A1,A2,B1,K}] 
+	end ++ prepare_tartab([[A2,B2]|R]).
 
 
 
@@ -1164,7 +1343,6 @@ process_counter(V1, V2, Limit) ->
 	end.
 
 get_event_subs(ID) ->
-	lager:error("parse subs ~p",[ID]),
 	try 
 		{ok,_Hdr,RawSubs}=psql:equery("select d.id,u.id,u.personal_channel,e.name,e.plugin_name,e.eename,params,severity from device_events d left join events e on e.id=event_id left join users u on u.id=user_id where device_id=$1",[ID]),
 		lists:filtermap(fun({EvID,Uid,UPid,EvName,PiName,EeName,UParams,Sev}) -> 

@@ -1,4 +1,4 @@
--module(redissource).
+-module(recalculator).
 
 -behaviour(gen_server).
 
@@ -13,7 +13,11 @@
          terminate/2,
          code_change/3]).
 
--record(state, {redispid,chan,imeicache}).
+-record(state, { 
+		  car_id,
+		  hour,
+		  actions
+		 }).
 
 %%%===================================================================
 %%% API functions
@@ -26,8 +30,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Host, Port, Chan) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Host, Port, Chan], []).
+start_link(CarID,Hour,Actions) ->
+    gen_server:start_link(?MODULE, [CarID,Hour,Actions], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -44,13 +48,15 @@ start_link(Host, Port, Chan) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Host, Port, Chan]) ->
-	{ok, Pid} = eredis_sub:start_link(Host, Port, ""),
-	lager:info("Eredis up ~p: ~p:~p",[Pid,Host,Port]),
-	eredis_sub:controlling_process(Pid),
-	eredis_sub:subscribe(Pid, [Chan]),
-	lager:info("Eredis up ~p subscribe ~p",[Pid,Chan]),
-	{ok, #state{redispid=Pid,chan=Chan,imeicache=dict:new()}}.
+init([CarID,Hour,Actions]) ->
+	lager:info("Recalc ~p, ~p: ~p",[CarID,Hour,Actions]),
+	gen_server:cast(self(), run_task),
+	{ok, #state{
+			car_id=CarID,
+			hour=Hour, 
+			actions=Actions
+		   }
+	}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -80,6 +86,12 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast(run_task, State) ->
+%	erlang:send_after(1000,self(),{finish}),
+%	{noreply, State};
+	gen_server:cast(recalculator_dispatcher, {finished, State#state.car_id,State#state.hour}),
+	{stop, normal, State};
+	
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -93,86 +105,13 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-imei2deviceID(IMEI,Dict) ->
-	T=case dict:find(IMEI, Dict) of
-		{ok, {ID, Time}} ->
-			case timer:now_diff(now(),Time)<600000000 of
-				true -> 
-					{ok, ID};
-				false ->
-					error
-			end;
-		_ ->
-			error
-	end,
-	case T of 
-		{ok, MID} ->
-			{ok, MID, Dict};
-		error ->
-			case psql:equery("select id from devices where imei=$1",[IMEI]) of
-				{ok,_Hdr,[{Data}]} ->
-					D2=dict:store(IMEI,{Data,now()},Dict),
-					{ok, Data, D2};
-				_ -> {error, none, Dict}
-			end
-	end.
+handle_info({finish},State) ->
+	gen_server:cast(recalculator_dispatcher, {finished, State#state.car_id,State#state.hour}),
+	{stop, normal, State};
 
-handle_info({message,_Chan,Payload,SrcPid}, State) ->
-	eredis_sub:ack_message(SrcPid),
-	try mochijson2:decode(Payload) of
-		   {struct,List} when is_list(List) ->
-			DevID = case proplists:lookup(<<"imei">>,List) of
-					   {<<"imei">>, IMEIb} ->
-						   %lager:info("Ok, imei is ~p",[IMEIb]),
-							flogger:log("log/source_"++binary_to_list(IMEIb)++".log", Payload),
-						   imei2deviceID(binary_to_list(IMEIb),State#state.imeicache);
-					   _none ->
-							flogger:log("log/source_noimei.log", Payload),
-						   lager:info("There is no imei :("),
-						   {error, false, State}
-				   end, 
-%			DevTime = case proplists:lookup(<<"dt">>,List) of
-%						  {<<"dt">>, TimestampB} when is_binary(TimestampB) ->
-%							  binary_to_integer(TimestampB);
-%						  _ ->
-%							  0
-%					  end, 
-			   %lager:info("Ok, device ~p",[DevID]),
-			   case DevID of 
-				   {ok, ID, D2} -> 
-					   case global:whereis_name({device,ID}) of
-						   undefined -> 
-							   case supervisor:start_child(dev_sup,[ID]) of
-								   {ok,Pid} -> 
-									   gen_server:cast(Pid,{ds, List});
-								   Any -> 
-									   lager:error("Can't start device: ~p",[Any])
-							   end;
-						   Pid ->
-							   gen_server:cast(Pid,{ds, List})
-					   end,
-					   {noreply, State#state{imeicache=D2}};
-				   _ -> 
-					   {noreply, State}
-			   end;
-		   _Any -> 
-			   flogger:log("log/source_badstruct.log", Payload),
-			   lager:error("Can't parse source ~p",[Payload]),
-			   {noreply, State}
-	   catch
-		   error:Err ->
-			   flogger:log("log/source_badjson.log", Payload),
-			   lager:error("Can't parse source ~p: ~p",[Err, Payload]),
-			   {noreply, State}
-	end;
+handle_info(_Info, State) ->
+    {noreply, State}.
 
-handle_info({subscribed,_Chan,SrcPid}, State) ->
-	eredis_sub:ack_message(SrcPid),
-	{noreply, State};
-
-handle_info(Info, State) ->
-	lager:info("Info ~p",[Info]),
-	{noreply, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -202,3 +141,5 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+

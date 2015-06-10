@@ -40,6 +40,10 @@ emit(Sub, HState, _Current, Prev0) ->
 						 end
 				 end, EF),
 			NexT=lists:foldl(fun({T,A},Acc)->
+
+			lager:info("I'm ~p:emit(~p,~n~p,~n~p)",[?MODULE, Sub, HState, _Current]),
+			lager:info("I'm ~p ~p",[?MODULE, EF]),
+			lager:info("I'm ~p ~p",[?MODULE, PI_Params]),
 									 if A > 0 ->
 											lager:debug("I'm ~p Fill ~p ~p",[Sub#usersub.evid, T, A]),
 											ee:emit_event(CarID,Sub,T,?MODULE,fill,[{amount,A}]);
@@ -53,6 +57,7 @@ emit(Sub, HState, _Current, Prev0) ->
 									 end
 							 end,PrevTime,L1),
 
+			lager:info("I'm ~p ~p nex ~p",[ ?MODULE, L1, NexT ]),
 
 			lager:debug("I'm ~p ~p nex ~p",[ ?MODULE, L1, NexT ]),
 
