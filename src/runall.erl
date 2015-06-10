@@ -67,8 +67,8 @@ autorun() ->
 %				  end,
 %				  Jobs).
 	{true, BS}=mng:raw_cmd(mongo, {distinct, <<"rawdata">>, key, <<"imei">>, query, {done,0}}),
-	PL=mng:m2proplist(BS),
-	Lst=dict:to_list( distribute(proplists:get_value(values,PL,[]),0,10,dict:new()) ),
+	PL=proplists:get_value(values,mng:m2proplist(BS),[]),
+	Lst=dict:to_list( distribute(PL,0,10,dict:new()) ),
 	PIDs=lists:map(fun({N,IMEIs}) ->
 						  io:format("Start ~p~n",[IMEIs]),
 						  {ok, PID}=runall:raws(IMEIs),
@@ -85,8 +85,9 @@ waitworkers(PIDs) ->
 	receive {'DOWN',_,process,PID,Reason} ->
 				io:format("PID ~p down ~p~n",[PID,Reason]),
 				waitworkers(lists:delete(PID,PIDs))
-	after 1000 -> 
-				io:format(".")
+	after 5000 -> 
+				io:format("."),
+				waitworkers(PIDs)
 	end.
 
 
@@ -141,8 +142,13 @@ run_hour([{hour,H,imei,I}|Rest],STime,PT,Done,Total) ->
 %				  end
 		  end,
 	if is_integer(DevID) ->
-		   io:format("Count ~p ~p ~p~n",
-					 [DevID,H,mng:raw_cmd(mongo, {count, <<"rawdata">>, query, {device,DevID,hour,H,done,1}})]),
+		   {true,{n,HCnt}}=mng:raw_cmd(mongo, {count, <<"rawdata">>, query, {device,DevID,hour,H,done,1}}),
+		   if HCnt>0 ->
+				  ok=mng:delete(mongo,<<"rawdata">>,{device,DevID,hour,H,done,1}),
+				  io:format("Count ~p ~p del~n", [DevID,H]);
+			  true -> 
+				  HCnt
+		   end,
 		   lager:info("2run Imei ~s Hour ~w ID ~w",[I,H,DevID]),
 		   Res=device:init([DevID,H,sync]),
 		   lager:info("Imei ~s Hour ~w ID ~w: ~w ",[I,H,DevID, Res]),
@@ -160,7 +166,8 @@ run_hour([{hour,H,imei,I}|Rest],STime,PT,Done,Total) ->
 					   trunc(((Done+1)/Total)*1000)/10,
 					   float_to_list((Done+1)/Spent,[{decimals, 4}, compact]),
 					   format_time(round(Est))]),
-		   runall:run_hour(Rest,STime,Ts,Done+1,Total);
+		   ok;
+		   %runall:run_hour(Rest,STime,Ts,Done+1,Total);
 	   true ->
 		   lager:info("Bad IMEI~p",[I]),
 		   runall:run_hour(Rest,STime,PT,Done+2 ,Total)

@@ -130,6 +130,11 @@ init([]) ->
 	       permanent, 2000, worker,
 	       []
 	   },
+	   {   rawcalc,
+	       {rawcalc,start_link, []}, 
+	       permanent, 2000, worker,
+	       []
+	   },
 	   {   erlsource,
 	       {erlsource,start_link, [ ] }, 
 	       permanent, 2000, worker,
