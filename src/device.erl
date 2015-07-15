@@ -81,7 +81,8 @@ get_init_hdata(ID,CHour,Fixed) ->
 			catch 
 				_:_ ->
 					lager:error("Can't decode redis data car ~p hour ~p",
-								[ID, CHour])
+								[ID, CHour]),
+					[]
 			end
 	end. 
 
@@ -291,7 +292,11 @@ init([ID,Hour,Recalc]) ->
 						lager:error("Can't decode config for device ~p",[ID]),
 						 []
 				end,
-			init1(ID,Kind,OID,CFG,Hour,Recalc, IMEI);
+			if Recalc == synccfg ->
+				   ok;
+			   true ->
+				   init1(ID,Kind,OID,CFG,Hour,Recalc, IMEI)
+			end;
 		_ -> 
 			{error, cant_start}
 	end.
@@ -346,7 +351,9 @@ handle_cast({stop, Reason}, State) ->
 handle_cast({ds, List}, State) ->
 	ds(List,State, 4);
 
-handle_cast({ds, _, 0}, State) ->
+handle_cast({ds, List, 0}, State) ->
+	lager:error("DS ttl exceeded for device ~p: ~p",
+				[State#state.id, List]),
 	{noreply, State};
 
 handle_cast({ds, List, TTL}, State) ->
@@ -902,7 +909,7 @@ process_ds(List0,State,Recalc) ->
 											   )
 							  };
 						 _ ->
-							 lager:error("PR ~p",[PrHist]),
+							 lager:error("Disordered packet ~p",[PrHist]),
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
 							   history_processed= lists:sort(fun 
@@ -933,7 +940,6 @@ ds(List0, State, TTL) ->
 			erlang:cancel_timer(Timer);
 		_ -> ok
 	end,
-
 
 	%	lager:info("Worker ~p got datasource ~p",[State#state.id,List0]),
 	List=[ {case K of B when is_binary(B) -> list_to_atom(binary_to_list(B)); _-> K end,V} || {K,V} <- List0 ],

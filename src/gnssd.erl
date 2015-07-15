@@ -125,6 +125,11 @@ init([]) ->
 	       permanent, 2000, worker,
 	       [poolboy,pgsql_worker,epgsql]
 	   },
+	   {   redislsource,
+	       {redislsource,start_link, [ RedisHost,RedisPort ] }, 
+	       permanent, 2000, worker,
+	       [poolboy,pgsql_worker,epgsql]
+	   },
 	   {   flogger,
 	       {flogger,start_link, []}, 
 	       permanent, 2000, worker,

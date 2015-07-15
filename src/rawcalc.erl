@@ -158,11 +158,15 @@ run_hour([],_,_,_,_) ->
 	done;
 
 run_hour([{hour,H,imei,I}|Rest],STime,PT,Done,Total) ->
+	{MSec,Sec,_USec}=now(),
+	UT=MSec*1000000+Sec,
+	NowHour=UT/3600,
 	DevID=case psql:equery("select id from devices where imei=$1", [I]) of
 			  {ok, _, [{ID}]} -> 
 				  ID;
 			  _ ->
 				  undefined
+				  %autocreate
 %				  try 
 %					  {ok, _, [{Nid}]}=psql:squery("select nextval('devices_id_seq')"),
 %					  NewID=if is_integer(Nid) ->
@@ -179,7 +183,10 @@ run_hour([{hour,H,imei,I}|Rest],STime,PT,Done,Total) ->
 %							undefined
 %				  end
 		  end,
-	if is_integer(DevID) ->
+	if H >= NowHour ->
+			lager:info("Do not run recalc for current hour (IMEI ~p)",[I]),
+			runall:run_hour(Rest,STime,PT,Done,Total-1);
+		is_integer(DevID) ->
 		   {true,{n,HCnt}}=mng:raw_cmd(mongo, {count, <<"rawdata">>, query, {device,DevID,hour,H,done,1}}),
 		   if HCnt>0 ->
 				  ok=mng:delete(mongo,<<"rawdata">>,{device,DevID,hour,H,done,1}),
@@ -201,13 +208,13 @@ run_hour([{hour,H,imei,I}|Rest],STime,PT,Done,Total) ->
 					   format_time(Spent1),
 					   Done+1,
 					   Total,
-					   trunc(((Done+1)/Total)*1000)/10,
+					   trunc(((Done+1)/Total)*1000)/10, %не могу представить ситуацию, чтобы Total стал равен нулю
 					   float_to_list((Done+1)/Spent,[{decimals, 4}, compact]),
 					   format_time(round(Est))]),
 		   runall:run_hour(Rest,STime,Ts,Done+1,Total);
 	   true ->
 		   lager:info("Bad IMEI~p",[I]),
-		   runall:run_hour(Rest,STime,PT,Done+2 ,Total)
+		   runall:run_hour(Rest,STime,PT,Done ,Total-1)
 	end.
 
 format_time(T) ->
@@ -220,12 +227,4 @@ format_time(T) ->
 	   is_integer(T) ->
 		   integer_to_list(T) ++ " sec"
 	end.
-	
-
-
-
-
-
-
-
 

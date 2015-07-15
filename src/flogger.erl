@@ -88,6 +88,21 @@ handle_info(checksize, State) ->
 	   }
 	};
 
+handle_info(close, State) ->
+	erlang:cancel_timer(State#state.timer),
+	lists:foreach(fun({Filename,IoDev})->
+							  lager:info("Closing ~p", [Filename]),
+							  catch file:close(IoDev)
+						  end,
+						  maps:to_list(State#state.files)
+				   ),
+	{noreply,
+	 State#state{
+	   files = #{},
+	   timer = erlang:send_after(10000, self(), checksize)
+	   }
+	};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -105,8 +120,6 @@ store_payload(File, Payload) ->
 	{{Yr,Mon,Day},{Hr,Min,Sec}}=calendar:local_time(),
 	UT={Yr,Mon,Day,Hr,Min,Sec},
 	IOL=if is_binary(Payload) ->
-			   io_lib:fwrite("~w ~s~n",[UT,Payload]);
-		   is_list(Payload) ->
 			   io_lib:fwrite("~w ~s~n",[UT,Payload]);
 		   true ->
 			   io_lib:fwrite("~w ~p~n",[UT,Payload])
