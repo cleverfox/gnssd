@@ -67,7 +67,7 @@ handle_info(checksize, State) ->
 								{ok,Finfo}=file:read_file_info(Filename),
 								Size=element(2,Finfo),
 								if Size>1024*1024 ->
-									   lager:info("Rotating ~p ~p",
+									   lager:debug("Rotating ~p ~p",
 										   [Filename, Size]),
 									   file:close(IoDev),
 									   rotate_file(Filename,10),

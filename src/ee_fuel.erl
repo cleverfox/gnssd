@@ -12,12 +12,14 @@ emit(Sub, HState, _Current, Prev0) ->
 	PrevTime=case Prev0 of
 				 {eef,X} ->
 					 X;
-				 _ -> 0
+				 _ ->
+					 0
 			 end,
 	case EF of
 		[] ->
 			{eef, PrevTime};
 		_ ->
+			lager:info("Prev ~p ~p",[PrevTime,CarID]),
 			lager:debug("I'm ~p:emit(~p,~n~p,~n~p)",[?MODULE, Sub, HState, _Current]),
 			lager:debug("I'm ~p ~p",[?MODULE, EF]),
 			Sliv=case proplists:get_value(mins,PI_Params) of
@@ -30,10 +32,10 @@ emit(Sub, HState, _Current, Prev0) ->
 					 Z when is_float(Z) -> Z;
 					 _ -> 10
 				 end,
-			lager:debug("I'm ~p ~p",[?MODULE, PI_Params]),
+			lager:info("I'm ~p ~p",[?MODULE, PI_Params]),
 			L1=lists:filter(
 				 fun({T,A}) -> 
-						 if T<PrevTime -> false;
+						 if PrevTime>=T -> false;
 							A>0 andalso A>=Zapr -> true;
 							A<0 andalso -A>=Sliv -> true;
 							true -> false
@@ -41,9 +43,9 @@ emit(Sub, HState, _Current, Prev0) ->
 				 end, EF),
 			NexT=lists:foldl(fun({T,A},Acc)->
 
-			lager:info("I'm ~p:emit(~p,~n~p,~n~p)",[?MODULE, Sub, HState, _Current]),
-			lager:info("I'm ~p ~p",[?MODULE, EF]),
-			lager:info("I'm ~p ~p",[?MODULE, PI_Params]),
+									 lager:info("I'm ~p:emit(~p,~n~p,~n~p)",[?MODULE, Sub, HState, _Current]),
+									 lager:info("I'm ~p ~p",[?MODULE, EF]),
+									 lager:info("I'm ~p ~p",[?MODULE, PI_Params]),
 									 if A > 0 ->
 											lager:debug("I'm ~p Fill ~p ~p",[Sub#usersub.evid, T, A]),
 											ee:emit_event(CarID,Sub,T,?MODULE,fill,[{amount,A}]);
@@ -58,8 +60,7 @@ emit(Sub, HState, _Current, Prev0) ->
 							 end,PrevTime,L1),
 
 			lager:info("I'm ~p ~p nex ~p",[ ?MODULE, L1, NexT ]),
-
-			lager:debug("I'm ~p ~p nex ~p",[ ?MODULE, L1, NexT ]),
+			%lager:debug("I'm ~p ~p nex ~p",[ ?MODULE, L1, NexT ]),
 
 			{eef, NexT}
 	end.

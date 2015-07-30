@@ -11,12 +11,15 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 	{_,T}=proplists:lookup(dt,Current),
 	{_,Speed}=proplists:lookup(sp,Current),
 	Settings=maps:get(settings,HState,[]),
-	Stop=Speed < proplists:get_value(minspeed,Settings,1),
+	MinSp=proplists:get_value(minspeed,Settings,1),
+	Stop=Speed < MinSp ,
 	%lager:info("stop ~p",[dict:to_list(State#state.data)]),
 	{LStart,LStop,LState,LProcessed} = case PI_Data of
 										   {A,B,C,D}  -> 
 											   {A,B,C,D};
 										   {_,{A,B,C,D}} -> 
+											   {A,B,C,D};
+										   {_,{A,B,C,D},_} -> 
 											   {A,B,C,D};
 										   _ -> 
 											   case Stop of
@@ -24,8 +27,10 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 												   _ -> {T, T, drive, false}
 											   end
 									   end,
+
 	POIs=proplists:get_value(current_poi,maps:get(pi_poi,HState,[]),[]),
 	ID=maps:get(id,HState),
+	MStop=proplists:get_value(minstop,Settings,90),
 	NSSData=case {Stop == (LState == stop), Stop, LProcessed} of
 				{true, true, _} -> %Still stopped
 					case LProcessed of
@@ -34,7 +39,6 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 							{LStart, LStop, LState, LProcessed};
 						false ->
 							lager:debug("Stop ~p",[PI_Data]),
-							MStop=proplists:get_value(minstop,Settings,300),
 							lager:debug("Car ~p stopped for ~p, real stop ~p",[ID,T-LStop,MStop]),
 							case T - LStop >= MStop of
 								true -> 
@@ -45,7 +49,7 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 									{LStart, LStop, LState, LProcessed}
 							end
 					end;
-				{true, false, _} -> %Still driveing, do nothing
+				{true, false, _} -> %Still driving, do nothing
 					{LStart, LStop, LState, false};
 				{false, true, _} -> %just stopped
 					lager:debug("Car ~p Drived for a ~p, beginning ~p",[ID,T-LStart,LStart]),
@@ -57,14 +61,37 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 					lager:debug("Car ~p Start after ~p",[ID,T-LStop]),
 					{T, LStop, drive, false};
 				{false, false, false} -> %started, but not fully stopped, ignore
-					% lager:debug("Car ~p Stopped for a ~p, stopped ~p",[State#state.id,T-LStop,LStop]),
+					{_,Odo}=proplists:lookup(softodometer,Current),
+					{Prev_T,PLon,PLat,PrevPOI} = case PI_Data of
+												   {_,_,{PT,[PPL,PPA],PPOI}} -> 
+													   {PT,PPL,PPA,PPOI};
+												   _ ->
+													   {T-1,Lon,Lat,[]}
+											   end,
+
+
+					%lager:info("Car ~p Stopped for a ~p, odo ~p stopped ~p",[ID,T-LStop,Odo,LStop]),
 					lager:debug("Car ~p reStart ~p",[ID,T-LStop]),
-					{LStart, LStop, drive, false}
+
+					if T-Prev_T>MStop ->
+						   AvgSp=Odo/(T-Prev_T),
+						   if AvgSp<MinSp ->
+								  savestop(ID,Prev_T,LStart,T,stop, {PLon, PLat, PrevPOI}),
+								  savestop(ID,Prev_T,T,T,drive, {PLon, PLat, PrevPOI}),
+								  lager:info("Car ~p Stopped for a ~p sec, avg spd ~p. 1 point stop",[ID,T-Prev_T,AvgSp]),
+								  {T, Prev_T, drive, false};
+							  true ->
+								  {LStart, LStop, drive, false}
+						   end;
+
+					   true ->
+						   {LStart, LStop, drive, false}
+					end
 			end,
 	%lager:info("Car ~p L ~p PrData ~p",[State#state.id,LState,{LStart,LStop,LState,LProcessed}]),
 	%lager:info("Car ~p L ~p SSData ~p",[State#state.id,LState,NSSData]),
 	{
-	 {Stop, NSSData}, 
+	 {Stop, NSSData, {T,[Lon,Lat],POIs}}, 
 	 [
 	  {isstop,Stop},
 	  {tstart,element(1,NSSData)},
@@ -73,6 +100,22 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Param) ->  %{private permanent d
 	  {handled,element(4,NSSData)}
 	 ]
 	}.
+
+savegk(DeviceID, Hour, Key, Ev, Coords) ->
+%	lager:info("Geocode dev ~p in ~p ~p ~p ~p",[DeviceID, Hour, Key, Ev, Coords]),
+	Redis=fun(W) -> 
+				  JBin=iolist_to_binary(mochijson2:encode(
+										  [
+										   {device,DeviceID},
+										   {hour,Hour},
+										   {ev,Ev},
+										   {coords,Coords},
+										   {key,Key}
+										  ])),
+				  eredis:q(W, [ "lpush", <<"geocode">>, JBin ])
+		  end,
+	poolboy:transaction(redis,Redis).
+
 
 savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) -> 
 	lager:debug("Car ~p Key: ~p",[DeviceID, {type,events, device,DeviceID, hour,gpstools:floor(LStop/3600)}]),
@@ -85,33 +128,37 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 			RKey = list_to_binary("drive."++integer_to_list(LStart)),
 			case StartH == StopH of
 				true ->
-					%lager:info("Combine update1"),
+					savegk(DeviceID, StartH, SKey, position, [Lon, Lat]),
+					savegk(DeviceID, StartH, RKey, eposition, [Lon, Lat]),
+%					lager:info("Geocode ~p in ~p ~p and ~p ~p",[{Lon, Lat}, KeyS, SKey,KeyS, RKey]),
 					mng:ins_update(mongo,<<"events">>, KeyS, {
-												   SKey,{
-													 duration, Now-LStop, 
-													 fin, 0, 
-													 position, [Lon, Lat], 
-													 poi, POIs},
-												   RKey,{
-													 duration, Now-LStart, 
-													 fin, 1, 
-													 eposition, [Lon, Lat]
-													}
-												  });
+														 SKey,{
+														   duration, Now-LStop, 
+														   fin, 0, 
+														   position, [Lon, Lat], 
+														   poi, POIs},
+														 <<RKey/binary,".duration">>, Now-LStart, 
+														 <<RKey/binary,".fin">>, 1, 
+														 <<RKey/binary,".eposition">>, [Lon, Lat]
+														});
 				_ -> 
 					%lager:info("Split update1"),
 					KeyR={type,events, device,DeviceID, hour,StartH},
+					savegk(DeviceID, StartH, SKey, position, [Lon, Lat]),
+					savegk(DeviceID, StartH, RKey, eposition, [Lon, Lat]),
+%					lager:info("Geocode ~p in ~p ~p and ~p ~p",[{Lon, Lat}, KeyS, SKey, KeyR, RKey]),
 					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{
 																duration, Now-LStop, 
 																fin, 0, 
 																position, [Lon, Lat], 
 																poi, POIs
-															   }}),
-					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{
-																duration, Now-LStart, 
-																fin, 1, 
-																eposition, [Lon, Lat]
-															   }})
+															   }
+															 }),
+					mng:ins_update(mongo,<<"events">>, KeyR, {
+														 <<RKey/binary,".duration">>, Now-LStart, 
+														 <<RKey/binary,".fin">>, 1, 
+														 <<RKey/binary,".eposition">>, [Lon, Lat]
+														})
 			end;
 		drive ->
 			NowH=gpstools:floor(Now/3600),
@@ -119,13 +166,14 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 			case NowH == StopH of
 				true -> 
 					%lager:info("Combine update2"),
+					savegk(DeviceID, NowH, RKey, sposition, [Lon, Lat]),
 					mng:ins_update(mongo,<<"events">>, KeyS, {
 												   <<SKey/binary,".duration">>, Now-LStop,
 												   <<SKey/binary,".fin">>, 1,
 												   RKey,{
 													 duration, Now-LStart, 
 													 fin, 0, 
-													 position, [Lon, Lat]
+													 sposition, [Lon, Lat]
 													}
 												  });
 				_ ->
@@ -135,11 +183,14 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 														 <<SKey/binary,".duration">>, Now-LStop, 
 														 <<SKey/binary,".fin">>, 1
 														}),
-					mng:ins_update(mongo,<<"events">>, KeyR, {RKey,{
-																duration, Now-LStart, 
-																fin, 0, 
-																position, [Lon, Lat]
-															   }})
+
+%					lager:info("Geocode ~p in ~p ~p",[{Lon, Lat}, KeyR, RKey]),
+					savegk(DeviceID, NowH, RKey, sposition, [Lon, Lat]),
+					mng:ins_update(mongo,<<"events">>, KeyR, {
+														 <<RKey/binary,".duration">>, Now-LStart, 
+														 <<RKey/binary,".fin">>, 0, 
+														 <<RKey/binary,".sposition">>, [Lon, Lat]
+														})
 			end;
 		_ ->
 			ok

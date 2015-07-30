@@ -53,7 +53,7 @@ ds_process(PI_Data0, _Current, _Hist, HState, _PI_Params) ->
 					   if T>PI_Data#pi_fuel_r.lastaggt ->
 							  {ok,Evs}=eredis:q(W, [ "hgetall", DKey++"events" ]),
 							  EvL=redisl2pl(Evs),
-							  lager:debug("PIch ~p evs ~p",[CarID, EvL]),
+							  lager:info("PIch ~p evs ~p",[CarID, EvL]),
 							  {PI_Data#pi_fuel_r{needcheck=false,lastaggt=T},EvL};
 						  true ->
 							  {PI_Data,[]}

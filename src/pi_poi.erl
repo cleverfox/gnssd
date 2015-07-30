@@ -9,12 +9,12 @@ ds_process(PI_Data, Current, Hist, HState) ->  %{private permanent data, public 
 ds_process(PI_Data, Current, _Hist, HState, _PI_Params) ->  %{private permanent data, public temporary data proplist}
 	{_,[Lon, Lat]}=proplists:lookup(position, Current),
 	{_,T}=proplists:lookup(dt,Current),
-	SQL="select id from pois where (organisation_id = $3 or organisation_id = 0 or organisation_id is null) and ST_Intersects(geo,st_makepoint($1,$2))",
+	SQL="select id from pois where (organisation_id = $3 or organisation_id = 0) and ST_Intersects(geo,st_makepoint($1,$2))",
 	Time1=now(),
 	SQLRes=psql:equery(SQL, [Lon,Lat,maps:get(org_id,HState,0)]),
 	TimeDiff=timer:now_diff(now(),Time1)/1000,
 	if TimeDiff>1000 ->
-		   lager:info("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]);
+		   lager:error("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]);
 	   true ->
 		   ok
 	end,

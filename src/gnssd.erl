@@ -130,6 +130,11 @@ init([]) ->
 	       permanent, 2000, worker,
 	       [poolboy,pgsql_worker,epgsql]
 	   },
+	   {   geocoder,
+	       {geocoder,start_link, [ RedisHost,RedisPort ] }, 
+	       permanent, 2000, worker,
+	       []
+	   },
 	   {   flogger,
 	       {flogger,start_link, []}, 
 	       permanent, 2000, worker,

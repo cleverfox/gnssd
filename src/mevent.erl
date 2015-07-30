@@ -4,6 +4,6 @@
 
 saveevent(DeviceID, EventDescription, Now) -> 
 	Key={type,events, device,DeviceID, hour,gpstools:floor(Now/3600)},
-	lager:info("Car ~p Event: ~p, ED ~p",[DeviceID, Key, EventDescription]),
+	lager:debug("Car ~p Event: ~p, ED ~p",[DeviceID, Key, EventDescription]),
 	mng:ins_update(mongo,<<"events">>, Key, EventDescription).
 

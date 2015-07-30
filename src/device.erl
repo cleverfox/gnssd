@@ -119,26 +119,25 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 
 		_ -> []
 	end,
-	lager:info("PL ~p",[PL]),
+%	lager:info("PL ~p",[PL]),
 	PLPDs=if Recalc==false -> 
-				 SrcData=case mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,ID,hour,UnixHour}) of
+				 case mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,ID,hour,UnixHour}) of
 							 {Term1} when is_tuple(Term1) -> 
-								 Term1;
+								 try 
+									 PLpdi=mng:m2proplist(Term1),
+									 case proplists:get_value(data,PLpdi) of 
+										 Listpdi when is_list(Listpdi) ->
+											 PLpdS0=[ mng:m2proplist(X) || X<-Listpdi ],
+											 [ {proplists:get_value(dt,X),X} || X<-PLpdS0 ];
+										 undefined -> 
+											 []
+									 end
+								 catch Ex:Ey ->
+										   lager:notice("Can't parse ~p ~p",[{Ex,Ey},Term1]),
+										   []
+								 end;
 							 _ -> [] %proplists:get_value(last_processed,HD,[])
-						 end,
-				 try 
-					 PLpdi=mng:m2proplist(SrcData),
-					 case proplists:get_value(data,PLpdi) of 
-						 Listpdi when is_list(Listpdi) ->
-							 PLpdS0=[ mng:m2proplist(X) || X<-Listpdi ],
-							 [ {proplists:get_value(dt,X),X} || X<-PLpdS0 ];
-						 undefined -> 
-							 []
-					 end
-				 catch Ex:Ey ->
-						   lager:notice("Can't parse ~p ~p",[{Ex,Ey},SrcData]),
-						   []
-				 end;
+						 end;
 				 true -> []
 		  end,
 	PLPD=case proplists:get_value(last_processed,HD,none) of
@@ -730,7 +729,67 @@ process_ds(List0,State,Recalc) ->
 							throw({badmatch,_Any,PRaw})
 					end,
 
-			SVals=process_variables(List, InCfg, PRawVal, DeltaT),
+%			if State#state.id==1 ->
+%				   lager:error("Id ~p",[List]),
+%				   lager:error("Cf ~p",[InCfg]);
+%			   true -> ok
+%			end,
+			{SVals,Errors}=process_variables(List, InCfg, PRawVal, DeltaT),
+			if is_list(Errors) andalso length(Errors)>0 ->
+				   SaveDB=fun({Src,Dst,Err,Val}) ->
+								  SrcL=if is_atom(Src) -> atom_to_list(Src);
+										  is_binary(Src) -> binary_to_list(Src);
+										  is_list(Src) -> Src;
+										  true -> "Unknown"
+									   end,
+								  DstL=if is_atom(Dst) -> atom_to_list(Dst);
+										  is_binary(Dst) -> binary_to_list(Dst);
+										  is_list(Dst) -> Dst;
+										  true -> "Unknown"
+									   end,
+								  ErrL=if is_atom(Err) -> atom_to_list(Err);
+										  is_binary(Err) -> binary_to_list(Err);
+										  is_list(Err) -> Err;
+										  true -> "Unknown"
+									   end,
+								  try
+									  {ok,_HDR,ErrRow}=psql:equery("select * from device_error where device_id=$1 and error_type=$2 limit 1",
+															   [State#state.id,SrcL++":"++DstL++":"++ErrL]),
+									  if ErrRow == [] ->
+											 psql:equery("insert into device_error (device_id,error_type,first_detected,first_data) values ($1,$2,now(),$3)",
+														 [
+														  State#state.id,
+														  SrcL++":"++DstL++":"++ErrL,
+														  iolist_to_binary(mochijson2:encode(
+																			 [
+																			  {type,Err},
+																			  {device,State#state.id},
+																			  {ds,Src},
+																			  {var,Dst},
+																			  {val,Val}
+																			 ]))
+														 ]),
+											 ok;
+										 true ->
+											 ok
+									  end,
+									  lager:debug("Device ~p DS error ~p ~p ~p",
+												  [State#state.id,SrcL++":"++DstL++":"++ErrL,Val,ErrRow])
+
+								  catch Ec:Ee -> 
+											lager:error("Error ~p:~p",[Ec,Ee]),
+											ok
+								  end
+						  end,
+				   lists:foreach(SaveDB, Errors);
+			   true -> ok
+			end,
+%			if State#state.id==1 ->
+%				   lager:error("DSr ~p",[PRawVal]),
+%				   lager:error("DS ~p",[SVals]);
+%			   true -> ok
+%			end,
+
 
 			SoftVars=case dict:find(lastpos,State#state.data) of % Software Odometer
 						 {ok, [0,0]} -> []; %skip if prev coords invalid;
@@ -1252,13 +1311,13 @@ prepare_tartab([[A1,B1],[A2,B2]|R]) ->
 
 
 
-process_variables1(_List, _Pre, [], Acc, _Dt) ->
-	Acc;
+process_variables1(_List, _Pre, [], Acc, Errors, _Dt) ->
+	{Acc, Errors};
 
-process_variables1(List, PreRaw, [X|Rest], Acc, Dt) ->
+process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
 	case proplists:get_value(X#incfg.dsname,List) of
 		undefined -> 
-			process_variables1(List, PreRaw, Rest, Acc, Dt);
+			process_variables1(List, PreRaw, Rest, Acc, Errors, Dt);
 		Val0 ->
 			Val=case X#incfg.type of
 					{counter, Limit} ->
@@ -1294,27 +1353,26 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Dt) ->
 						Val0
 				end,
 			
-			VFVal=case Val of
-					  null ->
-						  null;
-					  _ -> 
-						  case X#incfg.factor of
-							  1 -> Val;
-							  undefined -> Val;
-							  L when is_list(L) ->
-								  %lager:debug("Input ~w tar ~p",[X#incfg.dsname,L]),
-								  case tar(L,Val) of
-									  overflow -> null;
-									  underflow -> 0;
-									  Xi when is_integer(Xi) -> Xi;
-									  Xi when is_float(Xi) -> Xi
-								  end;
-
-							  Factor when is_integer(Factor) -> Val * Factor;
-							  Factor when is_float(Factor) -> Val * Factor;
-							  _Any -> 
-								  lager:info("Factor ~p",[_Any]),
-								  Val
+			{VFVal,Error}=case Val of
+							  null ->
+								  {null,[]};
+							  _ -> 
+								  case X#incfg.factor of
+									  1 -> {Val,[]};
+									  undefined -> {Val,[]};
+									  L when is_list(L) ->
+										  %lager:debug("Input ~w tar ~p",[X#incfg.dsname,L]),
+										  case tar(L,Val) of
+											  overflow -> {null,[{X#incfg.dsname,X#incfg.variable,tar_overflow,Val}]};
+											  underflow -> {0,[{X#incfg.dsname,X#incfg.variable,tar_underflow,Val}]};
+											  Xi when is_integer(Xi) -> {Xi, []};
+											  Xi when is_float(Xi) -> {Xi, []}
+										  end;
+									  Factor when is_integer(Factor) -> {Val * Factor, []};
+									  Factor when is_float(Factor) -> {Val * Factor,[]};
+									  _Any -> 
+										  lager:info("Factor ~p",[_Any]),
+										  {Val, [{X#incfg.dsname,X#incfg.variable,bad_factor,_Any}]}
 						  end
 				  end,
 
@@ -1323,7 +1381,14 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Dt) ->
 				false ->
 					lists:keystore(X#incfg.variable, 1, Acc, 
 								   { X#incfg.variable, VFVal });
-				{_Name,PreVal} ->
+				{_Name,PreVal0} ->
+					PreVal = if is_integer(PreVal0) ->
+									PreVal0;
+								is_float(PreVal0) ->
+									   PreVal0;
+								true -> 
+									0
+							 end,
 					lists:keystore(X#incfg.variable, 1, Acc, 
 								   { X#incfg.variable, PreVal+VFVal })
 			end,
@@ -1333,12 +1398,12 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Dt) ->
 			%{0 ,{X#incfg.dsname,0,0}}
 			%lager:debug("inCfg ~p Acc ~p",[X, NewAcc]),
 			%
-			process_variables1(List, PreRaw, Rest, NewAcc, Dt)
+			process_variables1(List, PreRaw, Rest, NewAcc, Error++Errors, Dt)
 	end.
 
 
 process_variables(List, InCfg, PreVar, Dt) -> % {SVals,SOfvs}.
-	process_variables1(List, PreVar, InCfg, [], Dt).
+	process_variables1(List, PreVar, InCfg, [], [], Dt).
 
 process_counter(undefined, _V2, _Limit) ->
 	0;
