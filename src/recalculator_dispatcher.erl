@@ -142,8 +142,23 @@ handle_cast(run_queue, State) ->
 					 {ok,undefined} -> 
 						 false;
 					 {ok, RecvdData } -> 
-						 lager:info("OK, ~p",[RecvdData]),
-						 true;
+						 try
+							 [BDev,BStart,BEnd,Aggs]=binary:split(RecvdData,[<<":">>],[global]),
+							 Dev=binary_to_integer(BDev),
+							 Start=binary_to_integer(BStart),
+							 End=binary_to_integer(BEnd),
+							 lager:info("OK, ~p ~p ~p ~p",[Dev,Start,End,Aggs]),
+							 case supervisor:start_child(recalculator_sup,[Dev,Start,End,Aggs]) of
+								 {ok, Pid} -> lager:info("Data recalculator ~p runned ~p",[Dev, Pid]),
+											  true;
+								 {error, Err} -> lager:error("Can't run data recalculator : ~p",[Err]),
+												 error
+							 end,
+							 true
+						 catch _:_ ->
+								   lager:error("Can't parse recalc string, ~p",[RecvdData]),
+								   true
+						 end;
 					 Any -> 
 						 lager:error("Error ~p",[Any]),
 						 false

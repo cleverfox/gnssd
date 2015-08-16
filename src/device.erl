@@ -315,8 +315,14 @@ init([ID,Hour,Recalc]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call(getState, _From, State) ->
+handle_call(get_state, _From, State) ->
 	{reply, State, State};
+
+handle_call(get_path, _From, State) ->
+	Res=lists:map(fun({DT,List}) ->
+						  [DT,proplists:get_value(position,List)]
+				  end, State#state.history_processed),
+	{reply, Res, State};
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
@@ -519,11 +525,62 @@ dump_stat(State, Force) ->
 						   {raw,HR1,done,1}
 						  ),
 			%lager:info("HR1 ~p = ~p",[HR1,MngRes]),
-
 			PHR=case State#state.history_processed of
-				   M1 when is_list(M1) -> M1;
-				   _ -> []
-			   end,
+					M1 when is_list(M1) -> 
+						M1;
+					_ -> 
+						[]
+				end,
+			Ht1=State#state.chour*3600,
+			Ht2=(State#state.chour+1)*3600,
+			CLFun=fun({_,E},Acc) ->
+						  DT=proplists:get_value(dt,E,0),
+						  [XPos,YPos]=proplists:get_value(position,E,undefined),
+						  if(DT>=Ht1 andalso DT<Ht2) ->
+								Interval=trunc(DT/1800),
+								case maps:get(Interval,Acc,undefined) of
+									{X1a, X2a, Y1a, Y2a} ->
+										{X1b, X2b} = if X1a > XPos -> {XPos, X2a};
+														X2a < XPos -> {X1a, XPos};
+														true -> {X1a, X2a}
+													 end,
+										{Y1b, Y2b} = if Y1a > YPos -> {YPos, Y2a};
+														Y2a < YPos -> {Y1a, YPos};
+														true -> {Y1a, Y2a}
+													 end,
+										maps:put(Interval,{X1b, X2b, Y1b, Y2b },Acc);
+									undefined ->
+										maps:put(Interval,{XPos,XPos,YPos,YPos},Acc)
+								end;
+							true ->
+								Acc
+						  end
+				  end,
+			CoarseLoc=try
+						  ResH=lists:foldl(CLFun, #{}, PHR),
+						  I1Mng=lists:map(fun({Hr,{X1a,X2a,Y1a,Y2a}}) ->
+											{<<(integer_to_binary(Hr))/binary,".",
+											   (integer_to_binary(State#state.id))/binary>>,
+											 {x1,X1a,x2,X2a,y1,Y1a,y2,Y2a}}
+											end,
+									maps:to_list(ResH)),
+						  I2Mng=mng:proplisttom(I1Mng),
+						  LKey={type,locations,
+								organisation_id,State#state.org_id,
+								day,trunc(State#state.chour/24)},
+						  _MngRes2=mng:ins_update(mongo,<<"locations">>,LKey,
+												  I2Mng
+												 ),
+						  lager:info("HR1 ~p = ~p ",[LKey, _MngRes2])
+
+					  catch 
+						  Ec:Ee -> 
+							  lists:map(fun(E)->
+												lager:error("At ~p",[E])
+										end,erlang:get_stacktrace()),
+							  {Ec,Ee}
+					  end,
+			lager:info("DumpCL ~p",[CoarseLoc]),
 			%lager:info("Dump PHR ~p",[PHR]),
 			PHR1=mng:proplist2tom(PHR),
 			{MSec,Sec,_} = now(),
@@ -703,7 +760,8 @@ process_ds(List0,State,Recalc) ->
 			lager:info("Device ~p ignoring dup packet T ~p",[State#state.id, T]),
 			State;
 		{PHist,PRaw} ->
-			%lager:debug("Device ~p Item ~p, prev ~p",[State#state.id, {T,now(),List}, PVal]),
+%			lager:debug("Device ~p Item ~p ~p",[State#state.id, T,
+%											proplists:lookup(rs0,List) ]),
 
 			PrHist=case is_list(State#state.history_processed) of
 					   true -> State#state.history_processed;
@@ -1190,13 +1248,20 @@ decode_settings(Settings) ->
 						 In=binary_to_list(InB),
 						 Var=proplists:get_value(variable,X,InB),
 						 Tab=proplists:get_value(table,X,1),
-						 Lim=case proplists:get_value(limitsd,X,[null,null]) of
-								[A,B] when 
-									(is_integer(A) orelse is_float(A) orelse A==null) andalso
-									(is_integer(B) orelse is_float(B) orelse B==null) ->
-									 {delta,A,B};
-								 _ ->
-									 undefined
+						 Lim=case proplists:get_value(limitsd,X,[null, null]) of
+								 [null,null] ->
+									 case proplists:get_value(limits,X,[null,null]) of
+										 [null, null] -> 
+											 undefined;
+										 [A,B] when 
+											   (is_integer(A) orelse is_float(A) orelse A==null) andalso
+											   (is_integer(B) orelse is_float(B) orelse B==null) ->
+											 {abs,A,B}
+									 end;
+								 [A,B] when 
+									   (is_integer(A) orelse is_float(A) orelse A==null) andalso
+									   (is_integer(B) orelse is_float(B) orelse B==null) ->
+									 {delta,A,B}
 							 end,
 						 %{in, K, X};
 						 Type1=case Type of
@@ -1349,7 +1414,24 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
 								lager:notice("Invalid data for bin: ~p",[Val0]),
 								0
 						end;
+					gauge ->
+
+						%lager:info("~p (~p) limit ~p = ~p ",
+						%		   [X#incfg.dsname,X#incfg.type,X#incfg.limits,Val0]),
+						case X#incfg.limits of
+							undefined -> Val0;
+							{abs,Min,Max} ->
+								if (Min==null orelse Val0 >= Min) andalso 
+								   (Max==null orelse Max >= Val0 ) ->
+									   Val0;
+								   true ->
+									   null
+								end;
+							_ ->
+								Val0
+						end;
 					_ ->
+						lager:info("Type ~p",[X#incfg.type]),
 						Val0
 				end,
 			

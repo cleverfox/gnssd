@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/3]).
+-export([start_link/4]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -15,8 +15,8 @@
 
 -record(state, { 
 		  car_id,
-		  hour,
-		  actions
+		  actions,
+		  task
 		 }).
 
 %%%===================================================================
@@ -30,8 +30,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(CarID,Hour,Actions) ->
-    gen_server:start_link(?MODULE, [CarID,Hour,Actions], []).
+start_link(CarID,T1,T2,Actions) ->
+    gen_server:start_link(?MODULE, [CarID,T1,T2,Actions], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -48,13 +48,15 @@ start_link(CarID,Hour,Actions) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([CarID,Hour,Actions]) ->
-	lager:info("Recalc ~p, ~p: ~p",[CarID,Hour,Actions]),
+init([CarID,T1,T2,Actions]) ->
+	H1=trunc(T1/3600),
+	H2=trunc(T2/3600),
+	lager:info("Recalc ~p, ~p-~p: ~p",[CarID,H1,H2,Actions]),
 	gen_server:cast(self(), run_task),
 	{ok, #state{
 			car_id=CarID,
-			hour=Hour, 
-			actions=Actions
+			actions=Actions,
+			task=lists:seq(H1,H2)
 		   }
 	}.
 
@@ -86,11 +88,17 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(run_task, State) ->
+handle_cast(run_task, #state{task=[]} = State) ->
+	gen_server:cast(recalculator_dispatcher, {finished, State#state.car_id}),
+	{stop, normal, State};
+
+handle_cast(run_task, #state{task=[CurT|RestT]} = State) ->
 %	erlang:send_after(1000,self(),{finish}),
 %	{noreply, State};
-	gen_server:cast(recalculator_dispatcher, {finished, State#state.car_id,State#state.hour}),
-	{stop, normal, State};
+	Res=device:init([State#state.car_id, CurT,sync]),
+	lager:info("recalc(~p,~p)=~p, to do ~p",[State#state.car_id, CurT, Res, length(RestT)]),
+	gen_server:cast(self(), run_task),
+	{noreply, State#state{task=RestT}};
 	
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -106,7 +114,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({finish},State) ->
-	gen_server:cast(recalculator_dispatcher, {finished, State#state.car_id,State#state.hour}),
+	gen_server:cast(recalculator_dispatcher, {finished, State#state.car_id}),
 	{stop, normal, State};
 
 handle_info(_Info, State) ->

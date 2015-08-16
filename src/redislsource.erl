@@ -137,9 +137,9 @@ handle_info({subscribed,_Chan,SrcPid}, State) ->
 
 handle_info(pull, State) ->
 	erlang:cancel_timer(State#state.timer),
-	T1=now(),
-	NewState=popmsg(State,500),
-	lager:info("Performance ~p /sec",[1/(((timer:now_diff(now(),T1)/1000000)+1)/500)]),
+	%T1=now(),
+	NewState=popmsg(State,5000),
+	%lager:info("Performance ~p /sec",[1/(((timer:now_diff(now(),T1)/1000000)+1)/500)]),
 
 	{ok, Count} = poolboy:transaction(redis,fun(W)-> eredis:q(W,[ "llen", "source" ]) end),
 	Timeout=case Count of 
@@ -148,7 +148,7 @@ handle_info(pull, State) ->
 				<<"0">> -> 
 					5000;
 				_ -> 
-					1000
+					10
 	end,
 	{noreply,
 	 NewState#state{

@@ -168,6 +168,17 @@ init([]) ->
 	       {recalculator_sup,start_link, [ ] },
 	       permanent, 2000, supervisor, []
 	   },
+	   {   cowboy_clock,
+	       {cowboy_clock,start_link, [ ] }, 
+	       permanent, 2000, worker,
+	       []
+	   },
+	   {   httprpc,
+	       {httprpc,start_link, [ ] }, 
+	       permanent, 2000, worker,
+	       [cowboy_clock]
+	   },
+
 	   {   recalculator_dispatcher,
 	       {recalculator_dispatcher,start_link, [ RedisHost, RedisPort, "recalc" ] },
 	       permanent, 2000, worker, []

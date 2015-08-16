@@ -13,7 +13,9 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Params) ->  %{private permanent 
 	Time1=now(),
 	SQLRes=psql:equery(SQL, [Lon,Lat,maps:get(org_id,HState,0)]),
 	TimeDiff=timer:now_diff(now(),Time1)/1000,
-	if TimeDiff>1000 ->
+
+	%lager:info("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]),
+	if TimeDiff>500 ->
 		   lager:error("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]);
 	   true ->
 		   ok

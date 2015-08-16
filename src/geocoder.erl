@@ -112,8 +112,13 @@ handle_info({subscribed,_Chan,SrcPid}, State) ->
 handle_info(pull, State) ->
 	erlang:cancel_timer(State#state.timer),
 	T1=now(),
-	NewState=popmsg(State,1),
-	lager:info("Performance ~p /sec",[1/(((timer:now_diff(now(),T1)/1000000)))]),
+	Max=100,
+	{NewState,Rest}=popmsg(State,Max),
+	if Max-Rest > 0 ->
+		   lager:info("Reqs: ~p took ~p ms/req",[Max-Rest,trunc((timer:now_diff(now(),T1))/(Max-Rest))/1000]);
+	   true -> 
+		   ok
+	end,
 
 	{ok, Count} = poolboy:transaction(redis,fun(W)-> eredis:q(W,[ "llen", "geocode" ]) end),
 	Timeout=case Count of 
@@ -122,7 +127,7 @@ handle_info(pull, State) ->
 				<<"0">> -> 
 					5000;
 				_ -> 
-					50
+					500
 	end,
 	{noreply,
 	 NewState#state{
@@ -164,7 +169,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 popmsg(State, 0) ->
-	State;
+	{State, 0};
 
 popmsg(State, Rest) ->
 	POP=poolboy:transaction(redis,fun(W)->
@@ -177,28 +182,56 @@ popmsg(State, Rest) ->
 						   case proplists:get_value(<<"coords">>,List) of
 									  [Lon,Lat] -> 
 										  Url="http://195.234.3.44:21000/nominatim/reverse?format=json&lat="++
-										  float_to_list(Lat,[{decimals, 10},compact])++
+										  f2l(Lat)++
 										  "&lon="++
-										  float_to_list(Lon,[{decimals, 10},compact])++
+										  f2l(Lon)++
 										  "&zoom=18&addressdetails=0",
 										  try
-												  {ok, {_,_,Body}} = httpc:request(get, {Url, []}, [], []),
-												  {struct,JS}=mochijson2:decode(Body),
-												  Name=proplists:get_value(<<"display_name">>,JS),
+												 case  httpc:request(get, {Url, []}, [], []) of
+													 {ok, {_,_,Body}} ->
+														 %CTry=proplists:get_value(<<"try">>,List,1),
+														 %lager:error("httpc ~p",[CTry]),
+														 {struct,JS}=mochijson2:decode(Body),
+														 Name=proplists:get_value(<<"display_name">>,JS),
 
-												  Dev=proplists:get_value(<<"device">>,List),
-												  Hr=proplists:get_value(<<"hour">>,List),
-												  Ev=proplists:get_value(<<"ev">>,List),
-												  Key=proplists:get_value(<<"key">>,List),
-												  KeyS={type,events, device,Dev, hour,Hr},
-												  Data={ <<Key/binary,".",Ev/binary,"_txt">>, Name },
-												  Res=mng:ins_update(mongo,<<"events">>, KeyS, Data),
-												  %Res={KeyS,Data},
-%												  lager:info("update ~p ~p ~p ~p -> ~p",[Dev, Hr, Key, Ev, Res]),
+														 Dev=proplists:get_value(<<"device">>,List),
+														 Hr=proplists:get_value(<<"hour">>,List),
+														 Ev=proplists:get_value(<<"ev">>,List),
+														 Key=proplists:get_value(<<"key">>,List),
+														 KeyS={type,events, device,Dev, hour,Hr},
+														 Data={ <<Key/binary,".",Ev/binary,"_txt">>, Name },
+														 Res=mng:ins_update(mongo,<<"events">>, KeyS, Data),
+														 %Res={KeyS,Data},
+														 %												  lager:info("update ~p ~p ~p ~p -> ~p",[Dev, Hr, Key, Ev, Res]),
 
-												  Name
-											  catch _:_ -> error
-											  end,
+														 Name;
+													 {error,socket_closed_remotely} -> 
+														 throw(retry)
+												 end
+											  catch 
+											  throw:retry ->
+												  Try=proplists:get_value(<<"try">>,List,1),
+												  List2=[{<<"try">>,Try+1}|List],
+												  %lager:error("JS ~p",[List2]),
+												  JSON2=iolist_to_binary(mochijson2:encode(List2)),
+												  %lager:error("JS2 ~p",[JSON2]),
+												  lager:error("geocoder retry ~p",[Try]),
+												  IFun=fun(W)->
+															   if Try < 2 ->
+																	  eredis:q(W,[ "rpush", "geocode", JSON2 ]);
+																  true -> 
+																	  eredis:q(W,[ "lpush", "geocode", JSON2 ])
+															   end
+													   end,
+												  poolboy:transaction(redis,IFun),
+
+
+												  error;
+
+											  Ec:Ee -> 
+												  lager:error("Geocoder error ~p:~p",[Ec,Ee]),
+												  error
+										  end,
 										  %lager:info("POP ~p ~p",[List, BJS]),
 										  ok;
 									  _ ->
@@ -215,8 +248,14 @@ popmsg(State, Rest) ->
 			end,
 			popmsg(State2,Rest-1);
 		{ok, undefined} ->
-			State;
+			{State,Rest};
 		_ ->
-			State
+			{State,Rest}
 	end.
+
+
+f2l(X) when is_float(X) ->
+	float_to_list(X,[{decimals, 10},compact]);
+f2l(X) when is_integer(X) ->
+	integer_to_list(X).
 

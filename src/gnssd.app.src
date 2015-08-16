@@ -3,9 +3,9 @@
   {description, "GNSS daemon"},
   {vsn, "1.0"},
   {id, "gnssd"},
-  {modules,      [gnssd,pgsql_worker]},
+  {modules,      [gnssd]},
   {registered,   []},
-  {applications, [kernel, stdlib, lager, bson, mongodb, inets]},
+  {applications, [kernel, stdlib, lager, bson, mongodb, inets, ranch]},
   {mod, {gnssd, []}},
   {env, [
   ]} %%env
