@@ -9,26 +9,32 @@ ds_process(PI_Data, Current, Hist, HState) ->  %{private permanent data, public 
 ds_process(PI_Data, Current, _Hist, HState, _PI_Params) ->  %{private permanent data, public temporary data proplist}
 	{_,[Lon, Lat]}=proplists:lookup(position, Current),
 	{_,T}=proplists:lookup(dt,Current),
-	SQL="select id from pois where (organisation_id = $3 or organisation_id = 0) and ST_Intersects(geo,st_makepoint($1,$2))",
-	Time1=now(),
-	SQLRes=psql:equery(SQL, [Lon,Lat,maps:get(org_id,HState,0)]),
-	TimeDiff=timer:now_diff(now(),Time1)/1000,
+	%SQL="select id from pois where (organisation_id = $3 or organisation_id = 0) and ST_Intersects(geo,st_makepoint($1,$2))",
+	%Time1=now(),
+	%SQLRes=psql:equery(SQL, [Lon,Lat,maps:get(org_id,HState,0)]),
+	%TimeDiff=timer:now_diff(now(),Time1)/1000,
 
-	%lager:info("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]),
-	if TimeDiff>500 ->
-		   lager:error("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]);
-	   true ->
-		   ok
-	end,
-	POIs=case SQLRes of
-			 {ok,_Hdr,Dat} ->
-				 [ X || {X} <- Dat ];
-			 _Any -> 
-				 []
-		 end,
+	%%lager:info("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]),
+	%if TimeDiff>500 ->
+	%	   lager:error("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]);
+	%   true ->
+	%	   ok
+	%end,
+	%POIs=case SQLRes of
+	%		 {ok,_Hdr,Dat} ->
+	%			 [ X || {X} <- Dat ];
+	%		 _Any -> 
+	%			 []
+	%	 end,
 	OLDPois=if is_list(PI_Data) -> PI_Data;
 			   true -> []
 			end,
+
+	POIs=case poi_lookup:lookup(maps:get(org_id,HState,0),Lon,Lat) of
+			 {timeout, _} -> OLDPois;
+			 {ok, List} -> List
+		 end,
+
 	POIIn=lists:subtract(POIs,OLDPois),
 	POIOut=lists:subtract(OLDPois,POIs),
 	case length(POIIn)>0 of

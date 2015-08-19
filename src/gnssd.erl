@@ -135,6 +135,11 @@ init([]) ->
 	       permanent, 2000, worker,
 	       []
 	   },
+	   {   poi_lookup1, {poi_lookup,start_link, []}, permanent, 2000, worker, [] },
+	   {   poi_lookup2, {poi_lookup,start_link, []}, permanent, 2000, worker, [] },
+	   {   poi_lookup3, {poi_lookup,start_link, []}, permanent, 2000, worker, [] },
+	   {   poi_lookup4, {poi_lookup,start_link, []}, permanent, 2000, worker, [] },
+	   {   poi_lookup5, {poi_lookup,start_link, []}, permanent, 2000, worker, [] },
 	   {   flogger,
 	       {flogger,start_link, []}, 
 	       permanent, 2000, worker,

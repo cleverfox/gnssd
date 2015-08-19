@@ -570,8 +570,8 @@ dump_stat(State, Force) ->
 								day,trunc(State#state.chour/24)},
 						  _MngRes2=mng:ins_update(mongo,<<"locations">>,LKey,
 												  I2Mng
-												 ),
-						  lager:info("HR1 ~p = ~p ",[LKey, _MngRes2])
+												 )
+						  %lager:info("HR1 ~p = ~p ",[LKey, _MngRes2])
 
 					  catch 
 						  Ec:Ee -> 
@@ -580,7 +580,7 @@ dump_stat(State, Force) ->
 										end,erlang:get_stacktrace()),
 							  {Ec,Ee}
 					  end,
-			lager:info("DumpCL ~p",[CoarseLoc]),
+			lager:debug("DumpCL ~p",[CoarseLoc]),
 			%lager:info("Dump PHR ~p",[PHR]),
 			PHR1=mng:proplist2tom(PHR),
 			{MSec,Sec,_} = now(),

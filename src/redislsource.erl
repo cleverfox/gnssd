@@ -137,9 +137,15 @@ handle_info({subscribed,_Chan,SrcPid}, State) ->
 
 handle_info(pull, State) ->
 	erlang:cancel_timer(State#state.timer),
-	%T1=now(),
-	NewState=popmsg(State,5000),
-	%lager:info("Performance ~p /sec",[1/(((timer:now_diff(now(),T1)/1000000)+1)/500)]),
+	PopLimit=10000,
+	T1=now(),
+	{NewState,PopRest}=popmsg(State,PopLimit),
+	Time=timer:now_diff(now(),T1)/1000000,
+	if PopRest < PopLimit ->
+		   lager:info("Performance ~p /sec ~p/~p",[(PopLimit-PopRest)/Time,(PopLimit-PopRest),Time]);
+	   true ->
+		   ok 
+	end,
 
 	{ok, Count} = poolboy:transaction(redis,fun(W)-> eredis:q(W,[ "llen", "source" ]) end),
 	Timeout=case Count of 
@@ -190,7 +196,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 popmsg(State, 0) ->
-	State;
+	{State,0};
 
 popmsg(State, Rest) ->
 	POP=poolboy:transaction(redis,fun(W)->
@@ -243,10 +249,10 @@ popmsg(State, Rest) ->
 			end,
 			popmsg(State2,Rest-1);
 		{ok, undefined} ->
-			State;
+			{State,Rest};
 		_ ->
 			flogger:log("log/source/badpop.log", POP),
 			lager:error("Bad source ~p",[POP]),
-			State
+			{State,Rest}
 	end.
 
