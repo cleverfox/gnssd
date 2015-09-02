@@ -44,6 +44,10 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 											{true,[list_to_binary(LK),list_to_binary(V)]};
 										[$v,$_|_] when is_binary(V) -> 
 											{true,[list_to_binary(LK),V]};
+										[$v,$_|_] when V==undefined -> 
+											{true,[list_to_binary(LK),null]};
+										[$v,$_|_] when V==null orelse V==false orelse V==true -> 
+											{true,[list_to_binary(LK),V]};
 										_ ->
 											false
 									end;

@@ -78,7 +78,7 @@ handle_call({lookup, Org, Lon, Lat, ReqNow, Timeout}, _From, State) ->
 	case timer:now_diff(now(),ReqNow)/1000 >= Timeout of
 		true ->
 			%lager:info("Reqd ~p ~p too late ~n",[Timeout,timer:now_diff(now(),ReqNow)/1000]),
-			{reply, {too_late,[],0}, maps:put({late,round(Timeout/10)}, maps:get(late,State,0)+1, State)};
+			{reply, {too_late,[],0}, maps:put({late,round(Timeout/10)}, maps:get({late,round(Timeout/10)},State,0)+1, State)};
 		false ->
 			%lager:info("Reqd ~p ~p ~n",[Timeout,timer:now_diff(now(),ReqNow)/1000]),
 			SQL="select id from pois where (organisation_id = $3 or organisation_id = 0) and ST_Intersects(geo,st_makepoint($1,$2))",
