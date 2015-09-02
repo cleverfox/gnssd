@@ -513,8 +513,17 @@ dump_stat(State, Force) ->
 	case (Force>0) orelse (LastSec > 300) of 
 		true ->
 			lager:debug("Device ~p dumping to mongodb....",[State#state.id]),
+			Disorder=case dict:find(disorder, State#state.data) of
+						 {ok, true} -> true;
+						 _ -> false
+					 end,
+			%dict:store(disorder, false, State#state.data)
 			HR=case State#state.history_raw of
-				   M when is_list(M) -> M;
+				   M when is_list(M) -> 
+					   if Disorder ->
+							  lists:sort(fun ({A,_},{B,_})-> B>A end, M);
+						  true -> M
+					   end;
 				   _ -> []
 			   end,
 			HR1=mng:proplist2tom(HR),
@@ -527,10 +536,14 @@ dump_stat(State, Force) ->
 			%lager:info("HR1 ~p = ~p",[HR1,MngRes]),
 			PHR=case State#state.history_processed of
 					M1 when is_list(M1) -> 
-						M1;
+					   if Disorder ->
+							  lists:sort(fun ({A,_},{B,_})-> B>A  end, M1);
+						  true -> M1
+					   end;
 					_ -> 
 						[]
 				end,
+			%lager:info("HD ~p",[hd(PHR)]),
 			Ht1=State#state.chour*3600,
 			Ht2=(State#state.chour+1)*3600,
 			CLFun=fun({_,E},Acc) ->
@@ -678,6 +691,23 @@ switch_hour(State) ->
 	%{LP1,LP2,LP3}=lists:last(St1#state.history_processed),
 	%Last_proc={LP1,LP2,LP3++[{prev_hour,1}]},
 	Last_proc=lists:last(St1#state.history_processed),
+	Disorder=case dict:find(disorder, State#state.data) of
+				 {ok, true} -> true;
+				 _ -> false
+			 end,
+	if Disorder -> 
+		   Bin= <<(integer_to_binary(State#state.id))/binary,
+				   (integer_to_binary(State#state.chour*3600))/binary,
+				   (integer_to_binary(State#state.chour*3600))/binary,
+				   ":">>,
+		   poolboy:transaction(redis,
+							   fun(W) -> 
+									   eredis:q(W,["lpush","recalc",Bin])
+							   end);
+	   true ->
+		   ok
+	end,
+
 	St1#state{
 	  history_raw=[Last_raw],
 	  history_processed=[Last_proc],
@@ -909,12 +939,15 @@ process_ds(List0,State,Recalc) ->
 							 case proplists:lookup(plugins,State#state.settings) of
 								 none -> [];
 								 {plugins,X} when is_list(X) -> 
-									 lists:filter(fun(Xi) when is_atom(Xi) -> true;
+									 %lager:info("dev ~p plugins ~p",[State#state.id, X]),
+									 lists:filter(fun({Xi,_}) when is_atom(Xi) -> true;
 													 (_) -> false
 												  end, X);
 								 _ -> []
 							 end ++ 
 							 maps:to_list(UserPI2h) ++ UserPI2l,
+							 %lager:info("settings ~p",[proplists:lookup(plugins,State#state.settings)]),
+							 %lager:info("plugins ~p",[Plugins]),
 							%lists:usort([  %run each configuration only once
 							%			  {	S#usersub.pi_name, S#usersub.params } || S <- State#state.usersub, is_atom(S#usersub.pi_name) andalso pi_name =/= '' andalso pi_name =/= null
 							%			 ]),
@@ -1017,6 +1050,7 @@ process_ds(List0,State,Recalc) ->
 
 							 State#state{
 							   cur_poi=POIs, 
+							   last_ptime=T,
 							   plugins_data=PState,
 							   history_raw=PHist, % ++ [{T,now(),List}], 
 							   history_processed=PrHist ++ [{T,PrData++EPrData}], 
@@ -1026,7 +1060,7 @@ process_ds(List0,State,Recalc) ->
 											   )
 							  };
 						 _ ->
-							 lager:error("Disordered packet ~p",[PrHist]),
+							 lager:error("Disordered packet ~p",[PrData]),
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
 							   history_processed= lists:sort(fun 
@@ -1034,7 +1068,7 @@ process_ds(List0,State,Recalc) ->
 																 ({A,_,_},{B,_,_})-> B>A 
 															 end,PrHist ++ [{T,PrData}]
 												   ), 
-							   data= dict:store(lastpos, [Lon, Lat], dict:store(disorder, true, State#state.data)), 
+							   data= dict:store(disorder, true, State#state.data), 
 							   chour=UnixHour}
 					 end,
 	dump_stat(NewState)
@@ -1074,6 +1108,9 @@ ds(List0, State, TTL) ->
 				NextUnixHour=trunc((MSec*1000000+Sec)/3600),
 
 				case UnixHour of
+					0 -> %invalid
+						lager:debug("Invalid data from car ~p: ~p",[State#state.id, List]),
+						State;
 					CurH -> %current hour
 						process_ds(List,State);
 					NextH -> %next hour
@@ -1236,8 +1273,16 @@ decode_settings(Settings) ->
 												  N2 when is_atom(N2) -> N2;
 												  _ -> N1
 											  end,
-											  {AName,processStruct(Args,Path,undefined, undefined)}
-								   end,X),
+											  {AName,processStruct(Args,Path,undefined, undefined)};
+										 ([Name]) ->
+											  N1=binary_to_list(Name),
+											  lager:debug("Proc ~p noArgs",[N1]),
+											  AName=case catch list_to_existing_atom(N1) of
+														N2 when is_atom(N2) -> N2;
+														_ -> N1
+													end,
+											  {AName,[]}
+   									  end,X),
 						 {K,X1};
 					 {[<<"inputs">>], struct} ->
 						 %lager:info("Proc ~p ~p decode: ~p",[Path,K,X]),
@@ -1269,6 +1314,10 @@ decode_settings(Settings) ->
 									   Bi=proplists:get_value(bits,X,1),
 									   Of=proplists:get_value(offset,X,0),
 									   {bin,Of,Bi};
+								   ibutton ->
+									   Bi=proplists:get_value(bits,X,64),
+									   Of=proplists:get_value(offset,X,0),
+									   {ibutton,Of,Bi};
 								   counter ->
 									   {counter, Ovf};
 								   _ -> 
@@ -1300,7 +1349,8 @@ decode_settings(Settings) ->
 								%, ovfval=Ovf
 							   };
 
-					 {[<<"inputs">>],Num} when is_integer(Num) ->
+					 {[<<"inputs">>],Num} when is_integer(Num) -> %deprecated
+						 lager:info("Deprecated format"),
 						 Type=proplists:get_value(type,X,gauge),
 						 Fact=proplists:get_value(factor,X,1),
 						 Ovf=proplists:get_value(ovfval,X,4294967296),
@@ -1408,11 +1458,24 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
 						CntrRes;
 					{bin, Off, Bits} ->
 						case Val0 of
+							null -> null;
+							false -> null;
 							_ when is_integer(Val0) ->
 								(Val0 bsr Off) band ((1 bsl Bits)-1);
 							_ -> 
 								lager:notice("Invalid data for bin: ~p",[Val0]),
-								0
+								null
+						end;
+					{ibutton, Off, Bits} ->
+						case Val0 of
+							null -> null;
+							false -> null;
+							_ when is_integer(Val0) ->
+								%lager:info("IButton ~p ~p",[X,(Val0 bsr Off) band ((1 bsl Bits)-1)]),
+								(Val0 bsr Off) band ((1 bsl Bits)-1);
+							_ -> 
+								lager:notice("Invalid data for ibutton: ~p",[Val0]),
+								null
 						end;
 					gauge ->
 
