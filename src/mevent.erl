@@ -20,8 +20,10 @@ saveibevent(DeviceID, remove, IBData) ->
 	MngObj=mng:proplisttom(lists:keydelete(bid,1,[{device, DeviceID}|IBData])),
 	case proplists:lookup(bid, IBData) of
 		{bid, ID} ->
-			mng:update(mongo,<<"ibutton">>,{'_id',{ID}}, MngObj); 
+			mng:update(mongo,<<"ibutton">>,{'_id',{ID}}, MngObj),
+			ID; 
 		_ ->
-			mng:insert(mongo,<<"ibutton">>, MngObj)
-	end,
-	ok.
+			PL=mng:insert(mongo,<<"ibutton">>, MngObj),
+			{MID}=proplists:get_value('_id',PL),
+			MID
+	end.

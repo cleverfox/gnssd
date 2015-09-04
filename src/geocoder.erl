@@ -194,16 +194,27 @@ popmsg(State, Rest) ->
 														 {struct,JS}=mochijson2:decode(Body),
 														 Name=proplists:get_value(<<"display_name">>,JS),
 
-														 Dev=proplists:get_value(<<"device">>,List),
-														 Hr=proplists:get_value(<<"hour">>,List),
 														 Ev=proplists:get_value(<<"ev">>,List),
-														 Key=proplists:get_value(<<"key">>,List),
-														 KeyS={type,events, device,Dev, hour,Hr},
-														 Data={ <<Key/binary,".",Ev/binary,"_txt">>, Name },
-														 Res=mng:ins_update(mongo,<<"events">>, KeyS, Data),
-														 %Res={KeyS,Data},
-														 %												  lager:info("update ~p ~p ~p ~p -> ~p",[Dev, Hr, Key, Ev, Res]),
+														 KeyS=case proplists:get_value(<<"id">>,List) of
+																  undefined -> 
+																	  Dev=proplists:get_value(<<"device">>,List),
+																	  Hr=proplists:get_value(<<"hour">>,List),
+																	  {type,events, device,Dev, hour,Hr};
+																  ID ->
+																	  {'_id',mng:hex2id(ID)}
+															  end,
 
+														 Data=case proplists:get_value(<<"key">>,List) of 
+																  undefined ->
+																	  { <<Ev/binary,"_txt">>, Name };
+																  Key ->
+																	  { <<Key/binary,".",Ev/binary,"_txt">>, Name }
+															  end,
+
+														 Collection=proplists:get_value(<<"collection">>,List,<<"events">>),
+														 Res=mng:ins_update(mongo, Collection, KeyS, Data),
+														 %Res={KeyS,Data},
+														 lager:info("update ~p ~p -> ~p ~p",[Collection, KeyS, Ev, Res]),
 														 Name;
 													 {error,socket_closed_remotely} -> 
 														 throw(retry)

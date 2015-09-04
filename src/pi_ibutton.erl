@@ -47,7 +47,7 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 	%lager:info("Dev ~p DS2 ~p",[Dev,PID2]),
 	Add=lists:subtract(PID2,maps:get(current,PID1,[])),
 %	Rem=lists:subtract(maps:get(current,PID1,[]),PID2),
-
+	CPOI=fun()-> proplists:get_value(current_poi,maps:get(pi_poi,HState,[]),[]) end,
 
 	{Info2,Remove}=lists:partition(fun({SN,Str}) ->
 										   case lists:member(SN,PID2) of
@@ -55,8 +55,11 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 												   true;
 											   false ->
 												   Str1=[{remove, proplists:get_value(dt,Current)},
+														 {remove_poi, CPOI()},
 														 {remove_pos, proplists:get_value(position,Current)}|Str],
-												   mevent:saveibevent(maps:get(id,HState),remove,Str1),
+												   NID=mevent:saveibevent(maps:get(id,HState),remove,Str1),
+%												   lager:info("NID ~p",[NID]),
+												   savegk(NID, <<"remove_pos">>, proplists:get_value(position,Current)),
 												   false
 										   end
 								   end, 
@@ -67,11 +70,13 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 									  undefined -> 
 										  Str=[
 											   {insert, proplists:get_value(dt,Current)},
+											   {insert_poi, CPOI()},
 											   {insert_pos, proplists:get_value(position,Current)},
 											   {serialnum, SN}
 											  ],
 										  case mevent:saveibevent(maps:get(id,HState),add,Str) of
 											  Res when is_binary(Res) ->
+												  savegk(Res, <<"insert_pos">>, proplists:get_value(position,Current)),
 												  {true, {SN,[{bid,Res}|Str]}};
 											  _ ->
 												  {true, {SN,Str}}
@@ -84,11 +89,13 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 											   {inv, Inv},
 											   %{Kind, Inv},
 											   {insert, proplists:get_value(dt,Current)},
+											   {insert_poi, CPOI()},
 											   {insert_pos, proplists:get_value(position,Current)},
 											   {org_id, Org}
 											  ],
 										  case mevent:saveibevent(maps:get(id,HState),add,Str) of
 											  Res when is_binary(Res) ->
+												  savegk(Res, <<"insert_pos">>, proplists:get_value(position,Current)),
 												  {true, {SN,[{bid,Res}|Str]}};
 											  _ ->
 												  {true, {SN,Str}}
@@ -97,11 +104,11 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 						  end, Add),
 
 	if length(Info3)>0 ->
-		   lager:debug("Dev ~p Add ~p",[Dev, Info3]);
+		   lager:info("Dev ~p Add ~p",[Dev, Info3]);
 	   true -> ok
 	end,
 	if length(Remove)>0 ->
-		   lager:debug("Dev ~p Rem ~p",[Dev, Remove]);
+		   lager:info("Dev ~p Rem ~p",[Dev, Remove]);
 	   true -> ok
 	end,
 
@@ -121,5 +128,24 @@ fetch_keyinfo(SN) ->
 	catch _:_ ->
 			  undefined
 	end.
+
 	
+savegk(ID, Ev, Coords) ->
+	try
+	lager:info("Geocode ~p ~p ~p",[ID, Ev, Coords]),
+	Redis=fun(W) -> 
+				  JBin=iolist_to_binary(mochijson2:encode(
+										  [
+										   {id,mng:id2hex(ID)},
+										   {collection, <<"ibutton">>},
+										   {ev,Ev},
+										   {coords,Coords}
+										  ])),
+				  lager:info("JBIN ~p",[JBin]),
+				  eredis:q(W, [ "lpush", <<"geocode">>, JBin ])
+		  end,
+	poolboy:transaction(redis,Redis)
+	catch _:_ ->
+			  ok
+	end.
 
