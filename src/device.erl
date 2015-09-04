@@ -696,10 +696,9 @@ switch_hour(State) ->
 				 _ -> false
 			 end,
 	if Disorder -> 
-		   Bin= <<(integer_to_binary(State#state.id))/binary,
-				   (integer_to_binary(State#state.chour*3600))/binary,
-				   (integer_to_binary(State#state.chour*3600))/binary,
-				   ":">>,
+		   Bin= <<(integer_to_binary(State#state.id))/binary,":",
+				   (integer_to_binary(State#state.chour*3600))/binary,":",
+				   (integer_to_binary(State#state.chour*3600))/binary,":">>,
 		   poolboy:transaction(redis,
 							   fun(W) -> 
 									   eredis:q(W,["lpush","recalc",Bin])
@@ -765,6 +764,18 @@ process_ds(List0,State,Recalc) ->
 	{_,T}=proplists:lookup(dt,List),
 	{_,AT}=proplists:lookup(at,List),
 	{_,Speed}=proplists:lookup(sp,List),
+	if Lon == null ->
+		   throw (badpos);
+	   Lat == null ->
+		   throw (badpos);
+	   Speed == null ->
+		   throw (badpos);
+	   Dir == null ->
+		   throw (badpos);
+	   true -> 
+		   ok
+	end,
+
 	UnixHour=trunc(T/3600),
 	PrepData=case {Recalc,is_list(State#state.history_raw),T > State#state.last_ptime} of
 				{true, true, _} -> %recalc. Do not change. 
@@ -1060,7 +1071,7 @@ process_ds(List0,State,Recalc) ->
 											   )
 							  };
 						 _ ->
-							 lager:error("Disordered packet ~p",[PrData]),
+							 lager:notice("Disordered packet ~p",[PrData]),
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
 							   history_processed= lists:sort(fun 
@@ -1075,13 +1086,18 @@ process_ds(List0,State,Recalc) ->
 	end
 	
 	catch
+		throw:badpos ->
+			lager:error("Car ~p Bad position in packet ~p",[State#state.id, List0]),
+			dump_stat(State);
 		GClass:GErr ->
 			lager:error("Car ~p ds error: ~p:~p",
 						[State#state.id, GClass, GErr]),
+			lager:error("Car ~p ds list: ~p",
+						[State#state.id, List0]),
 			lists:map(fun(E)->
 							  lager:error("At ~p",[E])
 					  end,erlang:get_stacktrace()),
-			{noreply, dump_stat(State)}
+			dump_stat(State)
 	end.
 
 
