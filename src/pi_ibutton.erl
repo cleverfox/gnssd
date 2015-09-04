@@ -54,7 +54,8 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 											   true ->
 												   true;
 											   false ->
-												   Str1=[{remove, proplists:get_value(dt,Current)}|Str],
+												   Str1=[{remove, proplists:get_value(dt,Current)},
+														 {remove_pos, proplists:get_value(position,Current)}|Str],
 												   mevent:saveibevent(maps:get(id,HState),remove,Str1),
 												   false
 										   end
@@ -66,6 +67,7 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 									  undefined -> 
 										  Str=[
 											   {insert, proplists:get_value(dt,Current)},
+											   {insert_pos, proplists:get_value(position,Current)},
 											   {serialnum, SN}
 											  ],
 										  case mevent:saveibevent(maps:get(id,HState),add,Str) of
@@ -82,6 +84,7 @@ ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent
 											   {inv, Inv},
 											   %{Kind, Inv},
 											   {insert, proplists:get_value(dt,Current)},
+											   {insert_pos, proplists:get_value(position,Current)},
 											   {org_id, Org}
 											  ],
 										  case mevent:saveibevent(maps:get(id,HState),add,Str) of
