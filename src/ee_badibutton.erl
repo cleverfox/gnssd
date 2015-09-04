@@ -5,7 +5,13 @@
 
 -export([emit/4]).
 
-emit(Sub, HState, Current, Prev) ->
+emit(Sub, HState, Current, Prev0) ->
+	Prev=if is_list(Prev0) ->
+				Prev0;
+			true ->
+				[]
+		 end,
+
 	CarID=maps:get(id,HState),
 	lager:debug("-----[ ~p ]-----",[?MODULE]),
 %	lager:info("I'm ~p:emit(~p,~n   ~p)",[?MODULE, Sub#usersub.params, HState]),
