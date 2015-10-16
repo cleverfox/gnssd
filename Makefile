@@ -4,7 +4,7 @@ INCLUDE=-pa deps/*/ebin \
 all:
 	./rebar compile
 run:
-	rlwrap --always-readline erl $(INCLUDE) \
+	erl $(INCLUDE) \
 	-kernel inetrc '"./erl_inetrc"' -connect_all false \
 	-boot start_sasl -name gnssd -config gnssd.config -s lager start -s gnssd start -s gnss_srv start -s sync go
 deploy:

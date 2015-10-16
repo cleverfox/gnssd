@@ -80,9 +80,15 @@ get_init_hdata(ID,CHour,Fixed) ->
 				binary_to_term(Bin,[safe])
 			catch 
 				_:_ ->
-					lager:error("Can't decode redis data car ~p hour ~p",
-								[ID, CHour]),
-					[]
+					try 
+						Term=binary_to_term(Bin),
+						lager:error("Redis Term decoded unsafelly ~p",[Term]),
+						Term
+					catch _:_ -> 
+							  lager:error("Can't decode redis data car ~p hour ~p",
+										  [ID, CHour]),
+							  []
+					end
 			end
 	end. 
 

@@ -180,13 +180,16 @@ popmsg(State, Rest) ->
 			State2=try mochijson2:decode(Payload) of
 				{struct,List} when is_list(List) ->
 						   case proplists:get_value(<<"coords">>,List) of
-									  [Lon,Lat] -> 
-										  Url="http://195.234.3.44:21000/nominatim/reverse?format=json&lat="++
-										  f2l(Lat)++
-										  "&lon="++
-										  f2l(Lon)++
-										  "&zoom=18&addressdetails=0",
-										  try
+							   [Lon,Lat] -> 
+								   Default= <<"http://195.234.3.44:21000/nominatim/reverse?format=json&lat=%LATlon=%LON%&zoom=18&addressdetails=0">>,
+								   Url=binary:replace(
+										 binary:replace(
+										   application:get_env(gnssd,geocoder,Default),
+										   "%LAT%",f2l(Lat)),
+										 "%LON%",f2l(Lon)),
+								   lager:info("Url ~p",[Url]),
+
+								   try
 												 case  httpc:request(get, {Url, []}, [], []) of
 													 {ok, {_,_,Body}} ->
 														 %CTry=proplists:get_value(<<"try">>,List,1),
@@ -214,7 +217,8 @@ popmsg(State, Rest) ->
 														 Collection=proplists:get_value(<<"collection">>,List,<<"events">>),
 														 Res=mng:ins_update(mongo, Collection, KeyS, Data),
 														 %Res={KeyS,Data},
-														 lager:info("update ~p ~p -> ~p ~p",[Collection, KeyS, Ev, Res]),
+														 lager:info("Geocoder ok url ~p",[Url]),
+														 lager:debug("update ~p ~p -> ~p ~p",[Collection, KeyS, Ev, Res]),
 														 Name;
 													 {error,socket_closed_remotely} -> 
 														 throw(retry)
@@ -223,9 +227,7 @@ popmsg(State, Rest) ->
 											  throw:retry ->
 												  Try=proplists:get_value(<<"try">>,List,1),
 												  List2=[{<<"try">>,Try+1}|List],
-												  %lager:error("JS ~p",[List2]),
 												  JSON2=iolist_to_binary(mochijson2:encode(List2)),
-												  %lager:error("JS2 ~p",[JSON2]),
 												  lager:error("geocoder retry ~p",[Try]),
 												  IFun=fun(W)->
 															   if Try < 2 ->
@@ -235,12 +237,23 @@ popmsg(State, Rest) ->
 															   end
 													   end,
 												  poolboy:transaction(redis,IFun),
-
-
 												  error;
 
 											  Ec:Ee -> 
 												  lager:error("Geocoder error ~p:~p",[Ec,Ee]),
+Try=proplists:get_value(<<"try">>,List,1),
+												  List2=[{<<"try">>,Try+1}|List],
+												  JSON2=iolist_to_binary(mochijson2:encode(List2)),
+												  lager:error("geocoder retry ~p",[Try]),
+												  IFun=fun(W)->
+												  	eredis:q(W,[ "rpush", "geocode", JSON2 ])
+												  end,
+												  if Try < 2 ->
+												  poolboy:transaction(redis,IFun);
+												  true ->
+												  ok
+												  end,
+
 												  error
 										  end,
 										  %lager:info("POP ~p ~p",[List, BJS]),
