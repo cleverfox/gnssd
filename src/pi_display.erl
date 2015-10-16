@@ -29,7 +29,7 @@ ds_process(PI_Data, Current, Hist, HState, PI_Args) ->  %{private permanent data
 
 ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permanent data, public temporary data proplist}
 	{_,[Lon, Lat]}=proplists:lookup(position, Current),
-	{_,T}=proplists:lookup(dt,Current),
+	T=proplists:get_value(dt,Current),
 	{_,Speed}=proplists:lookup(sp,Current),
 	{_,Dir}=proplists:lookup(dir,Current),
 
@@ -59,25 +59,37 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 	Bi=integer_to_binary(maps:get(id,HState)),
 	DevH= <<"device:lastpos:",Bi/binary>>,
 	DevP= <<"device:cpoi:",Bi/binary>>,
-	Redis=fun(W) -> 
-				  eredis:q(W, [ "hmset", DevH, 
-								"lng", f2b(Lon),
-								"lat", f2b(Lat),
-								"dir", f2b(Dir),
-								"Start", proplists:get_value(tstart,STOP,0),
-								"Stop", proplists:get_value(tstop,STOP,0),
-								"Status", proplists:get_value(status,STOP,drive), 
-								"StatusHandled", proplists:get_value(handled,STOP,false), 
-								"spd", case proplists:get_value(isstop,STOP,false) of 
-										   true -> 0; 
-										   _ -> f2b(Speed) 
-									   end,
-								"t", T ] ++ lists:flatten(Sensors) ),
-				  eredis:q(W, [ "del", DevP ]),
-				  eredis:q(W, [ "sadd", DevP ] ++ POIs)
-		  end,
-	poolboy:transaction(redis,Redis),
+	Cmd=[
+	 [ "hmset", DevH, 
+	   "lng", f2b(Lon),
+	   "lat", f2b(Lat),
+	   "dir", f2b(Dir),
+	   "Start", proplists:get_value(tstart,STOP,0),
+	   "Stop", proplists:get_value(tstop,STOP,0),
+	   "Status", proplists:get_value(status,STOP,drive), 
+	   "StatusHandled", proplists:get_value(handled,STOP,false), 
+	   "spd", case proplists:get_value(isstop,STOP,false) of 
+				  true -> 0; 
+				  _ -> f2b(Speed) 
+			  end,
+	   "t", T ] ++ lists:flatten(Sensors),
+	 [ "del", DevP]
+	] ++ 
+	case POIs of
+		[] -> 
+			[];
+		_ ->
+			[[ "sadd", DevP ] ++ POIs]
+	end,
+%	case maps:get(id,HState) < 10 of 
+%		true -> 
+%			lager:error("T ~p",[T]),
+%			lager:error("cmd ~p",[Cmd]);
+%		false-> ok
+%	end,
 
+	gen_server:cast(redis_set,{mcmd, Cmd }),	
+	
 	
 	%send data to push stream
 	SDir=case Dir of
@@ -93,7 +105,8 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 	Data={struct,[
 				  {type,position},
 				  {dev,maps:get(id,HState)},
-				  {dir,Dir},
+				  {dir,trunc(Dir)},
+				  {t,T},
 				  {sdir,SDir},
 				  {spd,Speed},
 				  {pois, POIs},
@@ -106,6 +119,17 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 				 ]},
 	%lager:info("JS: ~p",[JSData]),
 	notifyPos(PI_Args,Data),
+	DetailData=[
+				{type,details},
+				{device_id,maps:get(id,HState)},
+				{dir,trunc(Dir)},
+				{t,T},
+				{spd,Speed},
+				{pois, POIs },
+				{pos,[Lon, Lat]}
+			   ],
+	%lager:error("JS: ~p",[DetailData]),
+	notifyDetails(PI_Args,DetailData,Current,HState),
 
 	{T,[]}.
 
@@ -128,4 +152,62 @@ notifyPos(Subscribers,Data) ->
 				  end
 				 ),
 	ok.
+
+notifyDetails(Subscribers,Data,Current,HS) ->
+	Clients=case lists:keyfind(details,1,Subscribers) of
+				{details, L} when is_list(L) -> L;
+				_ -> []
+			end,
+	if Clients == [] ->
+		   ok;
+	   true ->
+%		   lager:error("HS ~p",[maps:keys(HS)]),
+		   IBData=lists:filtermap(fun({IBID,IBD}) ->
+%										  lager:error("HS ~p",[IBD]),
+										  KeyInfo1=[
+											{ib,IBID},
+											{insert, proplists:get_value(insert,IBD)},
+											{insert_pos, proplists:get_value(insert_pos,IBD)}
+										   ],
+										  KeyInfo=case proplists:get_value(kind, IBD) of
+													   undefined -> KeyInfo1;
+													   KKind -> [
+																 {kind, KKind},
+																 {id, proplists:get_value(ibutton_id,IBD)},
+																 {inv, proplists:get_value(inv,IBD)},
+																 {org_id, proplists:get_value(org_id,IBD)}
+																 | KeyInfo1 ]
+												   end,
+										  {true, KeyInfo }
+								  end,maps:get(pi_ibutton,HS,[])),
+		   %		   lager:error("HS ib ~p",[IBData]),
+		   EData=Data++[{cur, 
+						 lists:filtermap(fun({A,V}) ->
+												 case A of
+													 dt -> false;
+													 sp -> false;
+													 dir -> false;
+													 position -> false;
+													 softcompass -> {true, {A,trunc(V)}};
+													 softodometer -> {true, {A,trunc(V)}};
+													 v_odometer -> {true, {A,trunc(V*100)/100}};
+													 v_voltage -> {true, {A,trunc(V*100)/100}};
+													 v_fuel -> {true, {A,trunc(V*10)/10}};
+													 _ -> true
+												 end
+										 end,
+										 Current
+										)
+						}] ++ if IBData==[] -> [];
+								 true -> [{ib, IBData}]
+							  end,
+		   %JSData=jsx:encode(EData),
+		   Fd=fun(E) ->
+					  gen_server:cast(txtresolver,{push,<<"push:",E/binary>>,EData}),
+		%			  gen_server:cast(redis2nginx,{push,<<"push:",E/binary>>,JSData})
+					  ok
+			  end,
+		   lists:foreach(Fd, Clients),
+		   ok
+	end.
 

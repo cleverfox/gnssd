@@ -49,7 +49,7 @@ handle_call(_Request, _From, State) ->
 handle_cast({log, Filename, Payload}, State) ->
 	State2=case maps:get(Filename,State#state.files,undefined) of
 			   undefined ->
-				   case file:open(Filename,[append]) of
+				   case file:open(Filename,[append,{delayed_write,131072,10000}]) of
 					   {ok, File} ->
 						   erlang:group_leader(File, self()),
 						   store_payload(File,Payload),

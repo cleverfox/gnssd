@@ -27,12 +27,10 @@ ds_process(PI_Data0, _Current, _Hist, HState, _PI_Params) ->
 			case dict:find(mngid,maps:get(data,HState,dict:new())) of
 				{ok, MID} ->
 					HID=list_to_binary(mng:id2hex(MID)),
-					Redis=fun(W) -> 
-								  eredis:q(W, [ "lpush", <<"aggregate:express">>, <<HID/binary,":agg_fuelgauge">>]),
-								  eredis:q(W, [ "publish", <<"aggregate">>, HID ])
-						  end,
-					poolboy:transaction(redis,Redis),
-
+					gen_server:cast(redis_set,{mcmd, 
+											   [ "lpush", <<"aggregate:express">>, <<HID/binary,":agg_fuelgauge">>],
+											   [ "publish", <<"aggregate">>, HID ]
+											  }),
 					lager:debug("MID ~p ~p",[CarID, HID]),
 					MID;
 				_ ->

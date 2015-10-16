@@ -94,7 +94,7 @@ get_init_hdata(ID,CHour,Fixed) ->
 
 
 init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
-	{ok,PSub}=esub2:device_get_sub(position,ID),
+%	{ok,PSub}=esub2:device_get_sub(position,ID),
 	ESub=esub2:device_get_sub(ID),
 	Subs=get_event_subs(ID),
 	%lager:info("Sub ~p",[Subs]),
@@ -238,12 +238,12 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 				fixedhour=Hour,
 				kind=Kind,
 				settings=Settings,
-				sub_position=PSub,
+%				sub_position=PSub,
 				sub_ev=ESub,
 				data=Dict3,
 				current_values=dict:new(),
 				plugins_data = proplists:get_value(plugins_data,HD,#{}),
-				cur_poi=[],
+				%cur_poi=[],
 				usersub=Subs
 				},
 	case Recalc of
@@ -284,14 +284,13 @@ init([ID,Hour,Recalc]) ->
 					{ok, C} -> 
 						lager:debug("Settings ~p",[C]),
 						DevID=integer_to_binary(ID),
-						FW=fun(W)->
-								   eredis:q(W,[
-											   "setex", <<"device:config:",DevID/binary>>, 86400*365,
-											   term_to_binary(C,[{compressed,9}])
-											  ]) 
-						   end,
-						poolboy:transaction(redis,FW),
-
+						gen_server:cast(redis_set,{cmd, [
+														 <<"setex">>,
+														 <<"device:config:",DevID/binary>>, 
+														 86400*365,
+														 term_to_binary(C,[{compressed,9}])
+														] 
+												  }),
 						C;
 					_ -> 
 						lager:error("Can't decode config for device ~p",[ID]),
@@ -380,8 +379,9 @@ handle_cast({sub, SType}, State) ->
 			 M when is_binary(M) -> list_to_atom(binary_to_list(M));
 			 _ -> unknown
 		 end,
-	{ok,PSub}=esub2:device_get_sub(position,State#state.id),
+%	{ok,PSub}=esub2:device_get_sub(position,State#state.id),
 	{ok,Sub}=esub2:device_get_sub(Type,State#state.id),
+	lager:error("SUB update ~p: ~p",[SType,Sub]),
 	lager:debug("Worker ~p got notification ~p",[State#state.id,Type]),
 	SubEV=State#state.sub_ev,
 	{ESub,Found}=lists:mapfoldl(fun({K,V}, F)-> 
@@ -396,7 +396,9 @@ handle_cast({sub, SType}, State) ->
 			  0 -> SubEV ++ [{Type, Sub}];
 			  _ -> ESub
 		  end,
-	{noreply, State#state{sub_position=PSub,sub_ev=ESub2}};
+	{noreply, State#state{
+			%	sub_position=PSub,
+				sub_ev=ESub2}};
 
 
 handle_cast(reg, State) ->
@@ -417,13 +419,13 @@ handle_cast(reload_settings, State) ->
 				{ok, C} -> 
 					lager:info("Settings ~p",[C]),
 					DevID=integer_to_binary(State#state.id),
-					FW=fun(W)->
-							   eredis:q(W,[
-										   "setex", <<"device:config:",DevID/binary>>, 86400*365,
-										   term_to_binary(C,[{compressed,9}])
-										  ]) 
-					   end,
-					poolboy:transaction(redis,FW),
+					gen_server:cast(redis_set,{cmd, [
+													 <<"setex">>,
+													 <<"device:config:",DevID/binary>>, 
+													 86400*365,
+													 term_to_binary(C,[{compressed,9}])
+													] 
+											  }),
 
 					lager:info("Car ~p reload settings",[State#state.id]),
 					{noreply, State#state{
@@ -617,17 +619,16 @@ dump_stat(State, Force) ->
 			lager:debug("Car ~p InsUp ~p",[State#state.id,mng:id2hex(IUID)]),
 			case Force > 1 of
 				true ->
-					Redis=fun(W) -> 
-								  JBin=iolist_to_binary(mochijson2:encode(
-														  [
-														   {type,devicedata},
-														   {device,State#state.id},
-														   {hour,State#state.chour}
-														  ])),
-								  eredis:q(W, [ "lpush", <<"aggregate:devicedata">>, JBin ]),
-								  eredis:q(W, [ "publish", <<"aggregate">>, JBin ])
-						  end,
-					poolboy:transaction(redis,Redis);
+					JBin=iolist_to_binary(mochijson2:encode(
+											[
+											 {type,devicedata},
+											 {device,State#state.id},
+											 {hour,State#state.chour}
+											])),
+					gen_server:cast(redis_set,{mcmd, [
+													  [ "lpush", <<"aggregate:devicedata">>, JBin ],
+													  [ "publish", <<"aggregate">>, JBin ]
+													 ]});	
 				_ ->
 					ok
 			end,
@@ -654,28 +655,28 @@ dump_stat(State, Force) ->
 					[{last_processed,lists:last(Ls)}]
 			end,
 
-			FW=fun(W)->
-					   DevID=integer_to_binary(State#state.id),
-					   Hour=integer_to_binary(State#state.chour),
-					   DevH= <<"device:hdata:",DevID/binary,":",Hour/binary>>,
-					   eredis:q(W,[
-								   "setex", DevH, 7200,
-								   term_to_binary(Term,[{compressed,9}])
-								  ]),
-					   if State#state.fixedhour == 0 ->
-							  DevHp= <<"device:hdata:",DevID/binary>>,
-							  eredis:q(W,[
-										  "setex", DevHp, 86400*4,
-										  term_to_binary(Term,[{compressed,9}])
-										 ]);
-						  true -> 
-							  ok
-					   end
-			   end,
-			poolboy:transaction(redis,FW),
-
-
-
+			DevID=integer_to_binary(State#state.id),
+			Hour=integer_to_binary(State#state.chour),
+			DevH= <<"device:hdata:",DevID/binary,":",Hour/binary>>,
+			if State#state.fixedhour == 0 ->
+				   DevHp= <<"device:hdata:",DevID/binary>>,
+				   gen_server:cast(redis_set,{mcmd,  
+											  [
+											   [
+												"setex", DevHp, 86400*4,
+												term_to_binary(Term,[{compressed,9}])
+											   ],
+											   [
+												"setex", DevH, 7200,
+												term_to_binary(Term,[{compressed,9}])
+											   ] 
+											  ] });
+			   true -> 
+				   gen_server:cast(redis_set,{cmd, [
+													 "setex", DevH, 7200,
+													 term_to_binary(Term,[{compressed,9}])
+													]})
+			end,
 
 
 			State#state{data=dict:store(lastdump,now(),
@@ -705,10 +706,8 @@ switch_hour(State) ->
 		   Bin= <<(integer_to_binary(State#state.id))/binary,":",
 				   (integer_to_binary(State#state.chour*3600))/binary,":",
 				   (integer_to_binary(State#state.chour*3600))/binary,":">>,
-		   poolboy:transaction(redis,
-							   fun(W) -> 
-									   eredis:q(W,["lpush","recalc",Bin])
-							   end);
+
+		   gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]});
 	   true ->
 		   ok
 	end,
@@ -770,6 +769,14 @@ process_ds(List0,State,Recalc) ->
 	{_,T}=proplists:lookup(dt,List),
 	{_,AT}=proplists:lookup(at,List),
 	{_,Speed}=proplists:lookup(sp,List),
+%	case  State#state.id < 10 of 
+%		true -> 
+%			lager:error("DS ~p",[List0]),
+%			lager:error("T ~p",[T]);
+%		false->
+%		   	ok
+%	end,
+
 	if Lon == null ->
 		   throw (badpos);
 	   Lat == null ->
@@ -804,7 +811,7 @@ process_ds(List0,State,Recalc) ->
 			end,
 	case PrepData of
 		ignore ->
-			lager:info("Device ~p ignoring dup packet T ~p",[State#state.id, T]),
+			lager:debug("Device ~p ignoring dup packet T ~p",[State#state.id, T]),
 			State;
 		{PHist,PRaw} ->
 %			lager:debug("Device ~p Item ~p ~p",[State#state.id, T,
@@ -949,10 +956,6 @@ process_ds(List0,State,Recalc) ->
 										end,{maps:new(),[]},UserPIlst),
 
 							 Plugins=[{pi_poi,[]},{pi_stop,[]}] ++
-							 if T > State#state.last_ptime -> % only if it's newest one
-									[{pi_display,State#state.sub_ev}];
-								true -> []
-							 end ++ 
 							 case proplists:lookup(plugins,State#state.settings) of
 								 none -> [];
 								 {plugins,X} when is_list(X) -> 
@@ -962,7 +965,11 @@ process_ds(List0,State,Recalc) ->
 												  end, X);
 								 _ -> []
 							 end ++ 
-							 maps:to_list(UserPI2h) ++ UserPI2l,
+							 maps:to_list(UserPI2h) ++ UserPI2l ++ 
+							 if T > State#state.last_ptime -> % only if it's newest one
+									[{pi_display,State#state.sub_ev}];
+								true -> []
+							 end,
 							 %lager:info("settings ~p",[proplists:lookup(plugins,State#state.settings)]),
 							 %lager:info("plugins ~p",[Plugins]),
 							%lists:usort([  %run each configuration only once
@@ -1066,7 +1073,7 @@ process_ds(List0,State,Recalc) ->
 
 
 							 State#state{
-							   cur_poi=POIs, 
+							   %cur_poi=POIs, 
 							   last_ptime=T,
 							   plugins_data=PState,
 							   history_raw=PHist, % ++ [{T,now(),List}], 
@@ -1077,7 +1084,7 @@ process_ds(List0,State,Recalc) ->
 											   )
 							  };
 						 _ ->
-							 lager:notice("Disordered packet ~p",[PrData]),
+							 lager:debug("Disordered packet ~p",[PrData]),
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
 							   history_processed= lists:sort(fun 
@@ -1093,7 +1100,7 @@ process_ds(List0,State,Recalc) ->
 	
 	catch
 		throw:badpos ->
-			lager:error("Car ~p Bad position in packet ~p",[State#state.id, List0]),
+			lager:info("Car ~p Bad position in packet ~p",[State#state.id, List0]),
 			dump_stat(State);
 		GClass:GErr ->
 			lager:error("Car ~p ds error: ~p:~p",
@@ -1139,7 +1146,10 @@ ds(List0, State, TTL) ->
 						S1=switch_hour(State),
 						process_ds(List,S1);
 					_Any when _Any > NextUnixHour -> %data from future: incorrect time from device. ignore it.
-						lager:error("Data from future!!! ~p: Current hour ~p, Data hour ~p",[State#state.id,State#state.chour, UnixHour]),
+						PN={trunc(T/1000000),T rem 1000000,0},
+						PLT=calendar:now_to_local_time(PN),
+						lager:error("Device ~p Time from future ~p !!! Current hour ~p, Data hour ~p, next ~p",
+									[State#state.id, PLT, State#state.chour, UnixHour, NextUnixHour]),
 						State;
 					_Any when _Any < CurH -> %data from past. spawn new worker
 						case global:whereis_name({device, State#state.id, UnixHour}) of

@@ -120,6 +120,11 @@ init([]) ->
 	       permanent, 2000, worker,
 	       [poolboy,pgsql_worker,epgsql]
 	   },
+	   {   redis_set,                             
+	       {redis_set,start_link, [ RedisHost,RedisPort ] },             
+	       permanent, 2000, worker,
+	       []
+	   },
 	   {   redissource,
 	       {redissource,start_link, [ RedisHost,RedisPort, <<"source">> ] }, 
 	       permanent, 2000, worker,

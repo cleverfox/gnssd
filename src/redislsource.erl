@@ -16,7 +16,8 @@
 -record(state, {
 		  redispid,
 		  imeicache,
-		  timer
+		  timer,
+		  speed=[]
 		 }).
 
 %%%===================================================================
@@ -128,26 +129,49 @@ imei2deviceID(IMEI,Dict) ->
 
 handle_info({message,_Chan,_Payload,SrcPid}, State) ->
 	eredis_sub:ack_message(SrcPid),
-	NewState=popmsg(State,10),
-	{noreply, NewState};
+	{noreply, State};
 
 handle_info({subscribed,_Chan,SrcPid}, State) ->
 	eredis_sub:ack_message(SrcPid),
 	{noreply, State};
 
+handle_info(wait, State) ->
+	erlang:cancel_timer(State#state.timer),
+	lager:error("I will wait 30 sec"),
+	{noreply,
+	 State#state{
+	   timer = erlang:send_after(30000, self(), pull)
+	  }
+	};
+
 handle_info(pull, State) ->
 	erlang:cancel_timer(State#state.timer),
-	PopLimit=10000,
+	PopLimit=1000,
 	T1=now(),
-	{NewState,PopRest}=popmsg(State,PopLimit),
-	Time=timer:now_diff(now(),T1)/1000000,
+	{NewState,PopRest}=poolboy:transaction(redis,fun(W)-> popmsg(W, State,PopLimit) end),
+	{ok, Count} = poolboy:transaction(redis,fun(W)-> eredis:q(W,[ "llen", "source" ]) end),
+	Speed=(PopLimit-PopRest)/(timer:now_diff(now(),T1)/1000000),
+	NSpd=if is_list(State#state.speed) ->
+				NL=[Speed|State#state.speed],
+				try
+					{NSpd1,_}=lists:split(10,NL),
+					NSpd1
+				catch _:_ ->
+						  NL
+				end;
+			true ->
+				[Speed]
+		 end,
+	{SumSp,CntSp}=lists:foldl(fun(E,{Su,Cn}) ->
+									  {Su+E,Cn+1}
+							  end, {0,0}, NSpd),
 	if PopRest < PopLimit ->
-		   lager:info("Performance ~p /sec ~p/~p",[(PopLimit-PopRest)/Time,(PopLimit-PopRest),Time]);
+		   ICount=binary_to_integer(Count),
+		   lager:info("Reqs: ~p. ~p/sec (~p/sec avg). In queue ~p (~p min)",[PopLimit-PopRest,Speed,SumSp/CntSp,ICount,trunc(ICount/Speed/60)]);
 	   true ->
 		   ok 
 	end,
 
-	{ok, Count} = poolboy:transaction(redis,fun(W)-> eredis:q(W,[ "llen", "source" ]) end),
 	Timeout=case Count of 
 				0 -> 
 					5000;
@@ -158,7 +182,8 @@ handle_info(pull, State) ->
 	end,
 	{noreply,
 	 NewState#state{
-	   timer = erlang:send_after(Timeout, self(), pull)
+	   timer = erlang:send_after(Timeout, self(), pull),
+	   speed = NSpd
 	   }
 	};
 
@@ -195,35 +220,33 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-popmsg(State, 0) ->
+popmsg(_T, State, 0) ->
 	{State,0};
 
-popmsg(State, Rest) ->
-	POP=poolboy:transaction(redis,fun(W)->
-										  eredis:q(W,[ "rpop", "source" ])
-								  end),
+popmsg(W, State, Rest) ->
+	POP=eredis:q(W,[ "rpop", "source" ]),
 	case POP of 
 		{ok, Payload} when is_binary(Payload) ->
 			State2=try mochijson2:decode(Payload) of
-				{struct,List} when is_list(List) ->
-					case proplists:lookup(<<"imei">>,List) of
-								{<<"imei">>, IMEIb} ->
-									%lager:info("Ok, imei is ~p",[IMEIb]),
+					   {struct,List} when is_list(List) ->
+						   case proplists:lookup(<<"imei">>,List) of
+							   {<<"imei">>, IMEIb} ->
+								   %lager:info("Ok, imei is ~p",[IMEIb]),
 									case imei2deviceID(binary_to_list(IMEIb),State#state.imeicache) of
 										{ok, ID, Dict2} -> 
-											flogger:log("log/source/"++binary_to_list(IMEIb)++".log", Payload),
+											%flogger:log("log/source/"++binary_to_list(IMEIb)++".log", Payload),
 											case global:whereis_name({device,ID}) of
 												undefined -> 
 													case supervisor:start_child(dev_sup,[ID]) of
 														{ok,Pid} -> 
-															flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [start,Pid,Payload]),
+															%flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [start,Pid,Payload]),
 															gen_server:cast(Pid,{ds, List});
 														Any -> 
 															lager:error("Can't start device: ~p",[Any]),
 															flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [cantstart,Payload])
 													end;
 												Pid ->
-													flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [exists,Pid,Payload]),
+													%flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [exists,Pid,Payload]),
 													gen_server:cast(Pid,{ds, List})
 											end,
 											State#state{imeicache=Dict2};
@@ -234,7 +257,7 @@ popmsg(State, Rest) ->
 									end;
 								_none ->
 									flogger:log("log/source/noimei.log", Payload),
-									lager:error("There is no imei in data packet :("),
+									lager:info("There is no imei in data packet :("),
 									State
 							end;
 				_Any -> 
@@ -247,7 +270,7 @@ popmsg(State, Rest) ->
 					lager:error("Can't parse source ~p: ~p",[Err, Payload]),
 					State
 			end,
-			popmsg(State2,Rest-1);
+			popmsg(W,State2,Rest-1);
 		{ok, undefined} ->
 			{State,Rest};
 		_ ->
