@@ -49,15 +49,20 @@ handle_call(_Request, _From, State) ->
 handle_cast({log, Filename, Payload}, State) ->
 	State2=case maps:get(Filename,State#state.files,undefined) of
 			   undefined ->
-				   {ok, File}=file:open(Filename,[append]),
-				   erlang:group_leader(File, self()),
-				   store_payload(File,Payload),
-				   State#state{files=maps:put(Filename,File,State#state.files)};
+				   case file:open(Filename,[append]) of
+					   {ok, File} ->
+						   erlang:group_leader(File, self()),
+						   store_payload(File,Payload),
+						   State#state{files=maps:put(Filename,File,State#state.files)};
+					   Err ->
+						   lager:error("Can't log to file ~p: ~p",[Filename,Err]),
+						   State
+				   end;
 			   File ->
 				   store_payload(File,Payload),
 				   State
-	end,
-    {noreply, State2}.
+		   end,
+	{noreply, State2}.
 
 
 handle_info(checksize, State) ->
