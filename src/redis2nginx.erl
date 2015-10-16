@@ -46,7 +46,7 @@ start_link(Host, Port, Chan, Url) ->
 %%--------------------------------------------------------------------
 init([Host, Port, {Chan, Strip}, Url]) ->
 	{ok, Pid} = eredis_sub:start_link(Host, Port, ""),
-	lager:info("Eredis up ~p: ~p:~p",[Pid,Host,Port]),
+	lager:error("Eredis up ~p: ~p:~p url ~p",[Pid,Host,Port,Url]),
 	eredis_sub:controlling_process(Pid),
 	eredis_sub:psubscribe(Pid, [Chan]),
 	lager:info("Eredis up ~p subscribe ~p",[Pid,Chan]),
@@ -85,12 +85,21 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({push,Chan,Payload}, State) ->
-	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
-	{ok,{_RC,_RH,_Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
-	lager:debug("Push ~p:~p ~p",[Url,_RC,_Body]),
+	try
+		BR=binary:replace(Chan,State#state.strip,State#state.url,[]),
+		%lager:error("Push ~p ~p ~p -> ~p",[Chan,State#state.url,State#state.strip,BR]),
+		Url=binary_to_list(BR),
+		{ok,{_RC,_RH,_Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
+		%lager:error("Push ~p:~p ~p",[Url,_RC,_Body]),
+		ok
+	catch Ec:Ee ->
+		  lager:error("Push error ~p:~p",[Ec,Ee])
+	end,
+
 	{noreply, State};
 
 handle_cast(_Msg, State) ->
+	lager:error("Unknown cast ~p",[_Msg]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -106,7 +115,7 @@ handle_cast(_Msg, State) ->
 handle_info({pmessage,_PSub,Chan,Payload,SrcPid}, State) ->
 	Url=binary_to_list(binary:replace(Chan,State#state.strip,State#state.url,[])),
 	{ok,{RC,_RH,Body}}=httpc:request(post, {Url, [], "text/json", escape_payload(Payload)}, [], []),
-	lager:info("Push ~p:~p ~p",[Url,RC,Body]),
+	lager:debug("Push ~p:~p ~p",[Url,RC,Body]),
 	eredis_sub:ack_message(SrcPid),
 	{noreply, State};
 

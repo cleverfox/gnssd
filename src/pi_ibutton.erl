@@ -132,19 +132,16 @@ fetch_keyinfo(SN) ->
 	
 savegk(ID, Ev, Coords) ->
 	try
-	lager:info("Geocode ~p ~p ~p",[ID, Ev, Coords]),
-	Redis=fun(W) -> 
-				  JBin=iolist_to_binary(mochijson2:encode(
-										  [
-										   {id,mng:id2hex(ID)},
-										   {collection, <<"ibutton">>},
-										   {ev,Ev},
-										   {coords,Coords}
-										  ])),
-				  lager:info("JBIN ~p",[JBin]),
-				  eredis:q(W, [ "lpush", <<"geocode">>, JBin ])
-		  end,
-	poolboy:transaction(redis,Redis)
+		lager:info("Geocode ~p ~p ~p",[ID, Ev, Coords]),
+		JBin=iolist_to_binary(mochijson2:encode(
+								[
+								 {id,mng:id2hex(ID)},
+								 {collection, <<"ibutton">>},
+								 {ev,Ev},
+								 {coords,Coords}
+								])),
+		lager:info("JBIN ~p",[JBin]),
+		gen_server:cast(redis_set,{cmd, [ "lpush", <<"geocode">>, JBin ]})
 	catch _:_ ->
 			  ok
 	end.
