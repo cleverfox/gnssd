@@ -2,6 +2,8 @@
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
 
+-compile(nowarn_deprecated_function).
+
 %% ------------------------------------------------------------------
 %% API Function Exports
 %% ------------------------------------------------------------------

@@ -109,7 +109,7 @@ ds_process(PI_Data0, Current, Hist, _HState, _PI_Params) ->
 
 findevent([],_,Done) ->
 	Done;
-findevent([T|Rest],Prev,Done) ->
+findevent([T|Rest],_Prev,Done) ->
 	T1=T#pi_fuel_pdi{},
 	findevent(Rest,T,Done++[T1]).
 

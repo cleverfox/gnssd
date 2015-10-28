@@ -112,6 +112,10 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({progress, Car_id, Userid, Total, Done }, State) ->
+	lager:info("Progress ~p",[{Car_id, Userid, Total, Done }]),
+	{noreply, State};
+	
 handle_cast({finished, _}, State) ->
 	handle_cast(run_queue, State);
 	%{noreply, State};
@@ -143,12 +147,17 @@ handle_cast(run_queue, State) ->
 						 false;
 					 {ok, RecvdData } -> 
 						 try
-							 [BDev,BStart,BEnd,Aggs]=binary:split(RecvdData,[<<":">>],[global]),
+							 [BDev,BStart,BEnd,Aggs|Rest]=binary:split(RecvdData,[<<":">>],[global]),
+							 UserID=case Rest of 
+								 [XUserID|_] ->
+									 XUserID;
+								 _ -> undefined
+							 end,
 							 Dev=binary_to_integer(BDev),
 							 Start=binary_to_integer(BStart),
 							 End=binary_to_integer(BEnd),
 							 lager:info("OK, ~p ~p ~p ~p",[Dev,Start,End,Aggs]),
-							 case supervisor:start_child(recalculator_sup,[Dev,Start,End,Aggs]) of
+							 case supervisor:start_child(recalculator_sup,[Dev,Start,End,Aggs,UserID]) of
 								 {ok, Pid} -> lager:info("Data recalculator ~p runned ~p",[Dev, Pid]),
 											  true;
 								 {error, Err} -> lager:error("Can't run data recalculator : ~p",[Err]),

@@ -25,7 +25,7 @@ init(Req, State) ->
 					 LKey={type,locations, organisation_id,Org, day,trunc(T/86400)}, 
 					 HH=trunc(T/1800),
 					 H=trunc(T/3600),
-					 N1=erlang:now(),
+					 N1=time_compat:erlang_system_time(micro_seconds),
 					 MNG1=mng:find_one(mongo,<<"locations">>,LKey,{'_id',0,integer_to_binary(HH),1}),
 					 PL=case MNG1 of
 							{{_,L}} ->
@@ -72,8 +72,8 @@ init(Req, State) ->
 														false
 												 end
 										 end, PL),
-					 N2=erlang:now(),
-					 TMS=timer:now_diff(N2,N1)/1000,
+					 N2=time_compat:erlang_system_time(micro_seconds),
+					 TMS=N2-N1/1000,
 					 lager:info("Time_all ~p ms",[TMS]),
 					 %lager:info("PL ~p ~p",[TMS,PL1]),
 					 B=#{

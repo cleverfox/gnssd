@@ -106,7 +106,7 @@ handle_cast(_Msg, State) ->
 imei2deviceID(IMEI,Dict) ->
 	T=case dict:find(IMEI, Dict) of
 		{ok, {ID, Time}} ->
-			case timer:now_diff(now(),Time)<600000000 of
+			case (time_compat:erlang_system_time(seconds)-Time)<600 of
 				true -> 
 					{ok, ID};
 				false ->
@@ -121,7 +121,7 @@ imei2deviceID(IMEI,Dict) ->
 		error ->
 			case psql:equery("select id from devices where imei=$1",[IMEI]) of
 				{ok,_Hdr,[{Data}]} ->
-					D2=dict:store(IMEI,{Data,now()},Dict),
+					D2=dict:store(IMEI,{Data,time_compat:erlang_system_time(seconds)},Dict),
 					{ok, Data, D2};
 				_ -> {error, none, Dict}
 			end
@@ -144,13 +144,28 @@ handle_info(wait, State) ->
 	  }
 	};
 
+handle_info({wait, N}, State) ->
+	erlang:cancel_timer(State#state.timer),
+	lager:error("I will wait ~p sec",[N]),
+	{noreply,
+	 State#state{
+	   timer = erlang:send_after(N*1000, self(), pull)
+	  }
+	};
+
 handle_info(pull, State) ->
 	erlang:cancel_timer(State#state.timer),
 	PopLimit=1000,
-	T1=now(),
+	T1=time_compat:erlang_system_time(micro_seconds),
 	{NewState,PopRest}=poolboy:transaction(redis,fun(W)-> popmsg(W, State,PopLimit) end),
+	T2=time_compat:erlang_system_time(micro_seconds),
 	{ok, Count} = poolboy:transaction(redis,fun(W)-> eredis:q(W,[ "llen", "source" ]) end),
-	Speed=(PopLimit-PopRest)/(timer:now_diff(now(),T1)/1000000),
+	Speed=try 
+			  (PopLimit-PopRest)/((T2-T1)/1000000)
+		  catch SEc:SEe ->
+					lager:error("Can't calc speed ~p:~p PC ~p, T1 ~p, T2 ~p",
+								[SEc,SEe, PopLimit-PopRest, T1, T2 ])
+		  end,
 	NSpd=if is_list(State#state.speed) ->
 				NL=[Speed|State#state.speed],
 				try

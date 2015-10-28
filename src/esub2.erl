@@ -112,7 +112,7 @@ handle_info({subscribed,_Chan,SrcPid}, State) ->
 
 handle_info(cleanup, State) ->
 	erlang:cancel_timer(State#state.timer),
-	{MSec,Sec,_}=now(), Now=MSec*1000000+Sec,
+	Now=time_compat:erlang_system_time(seconds),
 	[ process_sub(State#state.table,X) || X<-ets:select(esub_data,[{{'$1','_','$2'},[{'<','$2',Now}],['$1']}])],
 	Timer=erlang:send_after(10000,self(),cleanup),
 	{noreply, State#state{timer=Timer}};
@@ -151,12 +151,9 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 process_all({Table, TableI}, Prefix) -> 
-	{MSec,Sec,_}=now(),
-	Now=MSec*1000000+Sec,
+	Now=time_compat:erlang_system_time(seconds),
 	Fun=fun(Worker) -> 
-				Time1=now(),
 				{ok, Array} = eredis:q(Worker, [ "keys", Prefix ++ "*" ]),
-				lager:info("Fetch keys ~p",[timer:now_diff(now(),Time1)/1000]),
 				GetItems = fun(X) ->
 								   %eredis:q(Worker, [ "expire", X, "5" ]),
 								   {ok, TTL} = eredis:q(Worker, [ "ttl", X ]),
@@ -169,9 +166,7 @@ process_all({Table, TableI}, Prefix) ->
 										   {X,[],TTL}
 								   end
 						   end,
-				Time2=now(),
 				R=[ GetItems(X) || X<-Array ],
-				lager:info("Fetch values ~p",[timer:now_diff(now(),Time2)/1000]),
 				R
 		end,
 	Arr=poolboy:transaction(redis, Fun),
@@ -234,8 +229,7 @@ process_sub({Table, TableI}, Name) when is_binary(Name) ->
 										  {ok, STTL} = eredis:q(Worker, [ "TTL", Name ]),
 										  list_to_integer(binary_to_list(STTL))
 								  end),
-	{MSec,Sec,_}=now(),
-	Now=MSec*1000000+Sec,
+	Now=time_compat:erlang_system_time(seconds),
 	Notify=case TTL>0 of
 		true -> 
 			process_sub2({Table,TableI},Name,List,TTL+Now);

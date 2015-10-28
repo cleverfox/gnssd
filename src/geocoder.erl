@@ -111,11 +111,12 @@ handle_info({subscribed,_Chan,SrcPid}, State) ->
 
 handle_info(pull, State) ->
 	erlang:cancel_timer(State#state.timer),
-	T1=now(),
+	T1=time_compat:erlang_system_time(milli_seconds),
 	Max=100,
 	{NewState,Rest}=popmsg(State,Max),
+	T2=time_compat:erlang_system_time(milli_seconds),
 	if Max-Rest > 0 ->
-		   lager:info("Reqs: ~p took ~p ms/req",[Max-Rest,trunc((timer:now_diff(now(),T1))/(Max-Rest))/1000]);
+		   lager:info("Reqs: ~p took ~p ms/req",[Max-Rest,trunc((T2-T1)/(Max-Rest))]);
 	   true -> 
 		   ok
 	end,
@@ -181,15 +182,16 @@ popmsg(State, Rest) ->
 				{struct,List} when is_list(List) ->
 						   case proplists:get_value(<<"coords">>,List) of
 							   [Lon,Lat] -> 
-								   Default= <<"http://195.234.3.44:21000/nominatim/reverse?format=json&lat=%LATlon=%LON%&zoom=18&addressdetails=0">>,
-								   Url=binary:replace(
-										 binary:replace(
-										   application:get_env(gnssd,geocoder,Default),
-										   "%LAT%",f2l(Lat)),
-										 "%LON%",f2l(Lon)),
-								   lager:info("Url ~p",[Url]),
-
 								   try
+									   Default= <<"http://195.234.3.44:21000/nominatim/reverse?format=json&lat=%LATlon=%LON%&zoom=18&addressdetails=0">>,
+	
+									   Url=binary_to_list(binary:replace(
+											 binary:replace(
+											   application:get_env(gnssd,geocoder,Default),
+											   <<"%LAT%">>,f2b(Lat)),
+											 <<"%LON%">>,f2b(Lon))),
+									   lager:debug("Url ~p",[Url]),
+
 												 case  httpc:request(get, {Url, []}, [], []) of
 													 {ok, {_,_,Body}} ->
 														 %CTry=proplists:get_value(<<"try">>,List,1),
@@ -217,7 +219,7 @@ popmsg(State, Rest) ->
 														 Collection=proplists:get_value(<<"collection">>,List,<<"events">>),
 														 Res=mng:ins_update(mongo, Collection, KeyS, Data),
 														 %Res={KeyS,Data},
-														 lager:info("Geocoder ok url ~p",[Url]),
+														 lager:debug("Geocoder ok url ~p",[Url]),
 														 lager:debug("update ~p ~p -> ~p ~p",[Collection, KeyS, Ev, Res]),
 														 Name;
 													 {error,socket_closed_remotely} -> 
@@ -282,4 +284,8 @@ f2l(X) when is_float(X) ->
 	float_to_list(X,[{decimals, 10},compact]);
 f2l(X) when is_integer(X) ->
 	integer_to_list(X).
+f2b(X) when is_float(X) ->
+	float_to_binary(X,[{decimals, 10},compact]);
+f2b(X) when is_integer(X) ->
+	integer_to_binary(X).
 

@@ -13,8 +13,7 @@ separate() -> 0.
 ds_process(PI_Data0, _Current, _Hist, HState, _PI_Params) ->  
 	CarID = maps:get(id,HState),
 	CHour = maps:get(chour,HState),
-	{MSec,Sec,_}=now(), %TODO fix to dt
-	UnixTime=(MSec*1000000+Sec),
+	UnixTime=time_compat:erlang_system_time(seconds),
 	PI_Data=case PI_Data0 of
 				_ when is_record(PI_Data0, pi_fuel_r) -> 
 					PI_Data0;

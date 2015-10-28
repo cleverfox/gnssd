@@ -2,6 +2,8 @@
 
 -export([raw/1,run_hour/5,list/0,autorun/0,raws/1]).
 
+-compile(nowarn_deprecated_function).
+
 getN(_,0) ->
 	[];
 

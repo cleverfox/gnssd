@@ -101,8 +101,7 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 
 	UnixHour=case Hour of 
 				 0 -> 
-					 {MSec,Sec,_}=now(),
-					 trunc((MSec*1000000+Sec)/3600);
+					 trunc(time_compat:erlang_system_time(seconds)/3600);
 				 UH when is_integer(UH) -> 
 					 UH
 			 end,
@@ -176,7 +175,7 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 															 end 
 													 end, 0, PLS0),
 								 PLS1=[ {proplists:get_value(dt,X),X} || X<-PLS0 ],
-								 D1=dict:store(lastdump,now(),Dict),
+								 D1=dict:store(lastdump,time_compat:erlang_system_time(seconds),Dict),
 								 {MaxTime, PLS1, UnixHour, D1};
 							 undefined -> 
 								 {0, [], 0, Dict}
@@ -514,10 +513,11 @@ dump_stat(State) ->
 
 dump_stat(State, Force) ->
 	LastDump=case dict:find(lastdump,State#state.data) of
-				 error -> {0,0,0};
-				 {ok, {_,_,_}} = {ok, DateTime} -> DateTime
+				 error -> 0;
+				 {ok, {MSec,Sec,_}} -> MSec*1000000+Sec;
+				 {ok, DateTime} when is_integer(DateTime) -> DateTime
 			 end,
-	LastSec=timer:now_diff(now(),LastDump)/1000000,
+	LastSec=time_compat:erlang_system_time(seconds)-LastDump,
 	case (Force>0) orelse (LastSec > 300) of 
 		true ->
 			lager:debug("Device ~p dumping to mongodb....",[State#state.id]),
@@ -604,8 +604,7 @@ dump_stat(State, Force) ->
 			lager:debug("DumpCL ~p",[CoarseLoc]),
 			%lager:info("Dump PHR ~p",[PHR]),
 			PHR1=mng:proplist2tom(PHR),
-			{MSec,Sec,_} = now(),
-			Time=MSec*1000000 + Sec,
+			Time=time_compat:erlang_system_time(seconds),
 			IUID=mng:ins_update(mongo,<<"devicedata">>,
 						   {type,devicedata,
 							device,State#state.id,
@@ -679,7 +678,7 @@ dump_stat(State, Force) ->
 			end,
 
 
-			State#state{data=dict:store(lastdump,now(),
+			State#state{data=dict:store(lastdump,time_compat:erlang_system_time(seconds),
 										dict:store(mngid,IUID,
 												   State#state.data
 												  )
@@ -760,9 +759,7 @@ process_ds(List0,State,Recalc) ->
 			 {at, At} when is_integer(At) ->
 				 List0;
 			 _ ->
-				 {MSec,Sec,_}=now(),
-				 UnixTime=(MSec*1000000+Sec),
-				 List0++[{at, UnixTime}]
+				 List0++[{at, time_compat:erlang_system_time(seconds)}]
 		 end,
 	{_,[Lon, Lat]}=proplists:lookup(position,List),
 	{_,Dir}=proplists:lookup(dir,List),
@@ -800,7 +797,7 @@ process_ds(List0,State,Recalc) ->
 							{State#state.history_raw,PVal1}
 					end;
 				{false, false, _} ->  %New list
-					{[{T,now(),List}],undefined};
+					{[{T,time_compat:erlang_system_time(seconds),List}],undefined};
 				{false, true, true} -> %Append to end
 					add_raw_item(State#state.history_raw, {T,List});
 				{false, true, false} -> %Insert to middle
@@ -1133,8 +1130,8 @@ ds(List0, State, TTL) ->
 						 _ -> UnixHour
 					 end,
 				NextH=CurH+1,
-				{MSec,Sec,_}=now(),
-				NextUnixHour=trunc((MSec*1000000+Sec)/3600),
+				UnixTime=time_compat:erlang_system_time(seconds),
+				NextUnixHour=trunc(UnixTime/3600),
 
 				case UnixHour of
 					0 -> %invalid
@@ -1184,7 +1181,7 @@ ds(List0, State, TTL) ->
 	D2=dict:store(timer,
 				  erlang:send_after(1000*Timeo, self(), {stop, normal}),
 				  Res#state.data),
-	D3=dict:store(last_ds,now(),D2),
+	D3=dict:store(last_ds,time_compat:erlang_system_time(seconds),D2),
 	{noreply, Res#state{data=D3}}.
 
 
@@ -1639,7 +1636,8 @@ get_event_subs(ID) ->
 known_atoms() ->
 	[
 	 aggregators_autorun,
-	 aggregator_config
+	 aggregator_config,
+	 aggregators_alias
 	].
 
 %%% =====[ TEST ]======

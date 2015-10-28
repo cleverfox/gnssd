@@ -157,7 +157,7 @@ code_change(_OldVsn, State, _Extra) ->
 imei2deviceID(IMEI,Dict) ->
 	T=case dict:find(IMEI, Dict) of
 		{ok, {ID, Time}} ->
-			case timer:now_diff(now(),Time)<600000000 of
+			case (time_compat:erlang_system_time(seconds)-Time)<600 of
 				true -> 
 					{ok, ID};
 				false ->
@@ -172,7 +172,7 @@ imei2deviceID(IMEI,Dict) ->
 		error ->
 			case psql:equery("select id from devices where imei=$1",[IMEI]) of
 				{ok,_Hdr,[{Data}]} ->
-					D2=dict:store(IMEI,{Data,now()},Dict),
+					D2=dict:store(IMEI,{Data,time_compat:erlang_system_time(seconds)},Dict),
 					{ok, Data, D2};
 				_ -> {error, none, Dict}
 			end
