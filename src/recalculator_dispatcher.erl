@@ -125,6 +125,16 @@ handle_cast(run_queue, State) ->
 		undefined -> ok;
 		_ -> erlang:cancel_timer(State#state.timer)
 	end,
+	case poolboy:transaction(redis, fun(Worker) -> 
+											eredis:q(Worker, [ "rpop", "recalc_cancel" ])
+									end) of 
+		{ok, TaskID } when is_binary(TaskID) -> 
+			[ gen_server:cast(PID,{cancel,TaskID}) || {_,PID,_,_} <- supervisor:which_children(recalculator_sup) ],
+			ok;
+		_ -> 
+			ok
+	end,
+
 	AllowRun=case proplists:get_value(workers,supervisor:count_children(recalculator_sup)) of
 				 undefined -> 
 					 lager:error("Can't get worker count"),

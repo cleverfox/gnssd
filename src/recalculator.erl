@@ -97,6 +97,15 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({cancel,UserID}, State) ->
+	if State#state.userid == UserID ->
+		   gen_server:cast(recalculator_dispatcher, {cancelled, State#state.car_id}),
+		   {stop, normal, State};
+	   true ->
+		   {noreply, State}
+	end;
+
+
 handle_cast(run_task, #state{task=[]} = State) ->
 	gen_server:cast(recalculator_dispatcher, {finished, State#state.car_id}),
 	{stop, normal, State};
