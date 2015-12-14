@@ -4,7 +4,7 @@
 		  org_id,
 		  kind,
 		  settings, 
-		  pad_0_sub_position,
+		  min_ptime,
 		  sub_ev,
 		  pad1,
 		  history_raw,
@@ -23,6 +23,9 @@
 		  factor,
 		  variable, 
 		  limits,
-		  ovfval
+		  ovfval,
+		  multi,
+		  pad1,
+		  pad2
 		 }).
 
