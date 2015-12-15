@@ -11,7 +11,8 @@
          handle_cast/2,
          handle_info/2,
          terminate/2,
-         code_change/3]).
+         code_change/3,
+		 fetch_last/3]).
 
 -include("include/device.hrl").
 -include("include/usersub.hrl").
@@ -105,81 +106,13 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 				 UH when is_integer(UH) -> 
 					 UH
 			 end,
-	HD=get_init_hdata(ID,UnixHour-1, if Recalc == false -> false; true -> true end  ),
-	%lager:info("hdata ~p",[proplists:get_value(last_raw,HD,none)]),
+	PrevHourData=get_init_hdata(ID,UnixHour-1, Recalc =/= false ),
 	
-	PL=case mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,ID,hour,UnixHour}) of
-		{Term} when is_tuple(Term) -> 
-			mng:m2proplist(Term);
-		{} -> 
-			case mng:find_one(mongo,<<"rawdata">>,{type,rawdata,imei,IMEI,hour,UnixHour}) of
-				{Term} when is_tuple(Term) -> 
-					lager:info("Case 2 found"),
-					mng:update(mongo,<<"rawdata">>,
-							   {type,rawdata,imei,IMEI,hour,UnixHour},
-							   {device, ID}),
-					mng:m2proplist(Term);
-				_ -> []
-			end;
+	HistoryProcessed=preprocess_ddata(ID,UnixHour,Recalc,proplists:get_value(last_processed,PrevHourData,none)),
+	Dict=proplists:get_value(data,PrevHourData,dict:new()),
 
-		_ -> []
-	end,
-%	lager:info("PL ~p",[PL]),
-	PLPDs=if Recalc==false -> 
-				 case mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,ID,hour,UnixHour}) of
-							 {Term1} when is_tuple(Term1) -> 
-								 try 
-									 PLpdi=mng:m2proplist(Term1),
-									 case proplists:get_value(data,PLpdi) of 
-										 Listpdi when is_list(Listpdi) ->
-											 PLpdS0=[ mng:m2proplist(X) || X<-Listpdi ],
-											 [ {proplists:get_value(dt,X),X} || X<-PLpdS0 ];
-										 undefined -> 
-											 []
-									 end
-								 catch Ex:Ey ->
-										   lager:notice("Can't parse ~p ~p",[{Ex,Ey},Term1]),
-										   []
-								 end;
-							 _ -> [] %proplists:get_value(last_processed,HD,[])
-						 end;
-				 true -> []
-		  end,
-	PLPD=case proplists:get_value(last_processed,HD,none) of
-			 {XpT,XpL} ->
-				 case PLPDs of 
-					 [] ->
-						 [{XpT,XpL}];
-					 [{XpT,_}|_] ->
-						 [];
-					 [_|_] ->
-						 [{XpT,XpL}]
-				 end;
-			 _ -> []
-		 end ++ PLPDs,
-	Dict=proplists:get_value(data,HD,dict:new()),
+	{LPTime, ParsedRawData, CHour, Dict1}=preprocess_rawdata(ID,IMEI,UnixHour,Recalc,Dict),
 
-	
-
-	{LPTime, PLS2, CHour, Dict1}=case proplists:get_value(raw,PL) of 
-							 List when is_list(List) ->
-								 PLS0=[ mng:m2proplist(X) || X<-List ],
-								 MaxTime=lists:foldl(fun(Arr,Ai)-> 
-															 V=case proplists:get_value(dt,Arr) of 
-																   X when is_integer(X) -> X; 
-																   _ -> 0
-															   end, 
-															 case Ai < V of 
-																 true -> V ; 
-																 _ -> Ai 
-															 end 
-													 end, 0, PLS0),
-								 PLS1=[ {proplists:get_value(dt,X),X} || X<-PLS0 ],
-								 D1=dict:store(lastdump,time_compat:erlang_system_time(seconds),Dict),
-								 {MaxTime, PLS1, UnixHour, D1};
-							 undefined -> 
-								 {0, [], 0, Dict}
-						 end,
 	
 	Dict2=dict:store(timeout,
 			case Hour of 
@@ -200,7 +133,11 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 																"Status",
 																"StatusHandled"
 															   ]) end) of
-					   {ok,[Sta,Sto,Stt,Han]} when is_binary(Sta) andalso is_binary(Sto) andalso is_binary(Stt) andalso is_binary(Han) -> 
+					   {ok,[Sta,Sto,Stt,Han]} when 
+							 is_binary(Sta) andalso 
+							 is_binary(Sto) andalso 
+							 is_binary(Stt) andalso 
+							 is_binary(Han) -> 
 						   dict:store(startstop, {b2i(Sta), b2i(Sto), b2a(Stt), b2a(Han) } , Dict2);
 					   _ -> 
 						   Dict2 
@@ -214,36 +151,41 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 		   ok
 	end,
 
-	PLS= case proplists:get_value(last_raw,HD,none) of
-			 {XlT,XlL} ->
-				 case PLS2 of 
-					 [] ->
-						 [{XlT,XlL}];
-					 [{XlT,_}|_] ->
-						 [];
-					 [_|_] ->
-						 [{XlT,XlL}]
-				 end;
-			 _ -> []
-		 end ++ PLS2,
+	HistoryRaw=if Recalc==false ->
+					  case proplists:get_value(last_raw,PrevHourData,none) of
+						  {XlT,XlL} ->
+							  case ParsedRawData of 
+								  [] ->
+									  [{XlT,XlL}];
+								  [{XlT,_}|_] ->
+									  [];
+								  [_|_] ->
+									  [{XlT,XlL}]
+							  end;
+						  _ -> []
+					  end ++ ParsedRawData;
+				  true ->
+					  ParsedRawData
+			   end,
+
+
+	%lager:info("NewP ~p",[lists:map(fun({Tm,_})->Tm end,HistoryRaw)]),
 
 	State=#state{last_ptime=if Recalc=/=false -> 0; true -> LPTime end,
-				history_raw=PLS,
-				history_processed=PLPD,
-				history_events=gb_trees:empty(),
-				chour=CHour,
-				id=ID,
-				org_id=OID,
-				fixedhour=Hour,
-				kind=Kind,
-				settings=Settings,
-%				sub_position=PSub,
-				sub_ev=ESub,
-				data=Dict3,
-				current_values=dict:new(),
-				plugins_data = proplists:get_value(plugins_data,HD,#{}),
-				%cur_poi=[],
-				usersub=Subs
+				 history_raw=HistoryRaw,
+				 history_processed=HistoryProcessed,
+				 history_events=gb_trees:empty(),
+				 chour=CHour,
+				 id=ID,
+				 org_id=OID,
+				 fixedhour=Hour,
+				 kind=Kind,
+				 settings=Settings,
+				 sub_ev=ESub,
+				 data=Dict3,
+				 current_values=dict:new(),
+				 plugins_data = proplists:get_value(plugins_data,PrevHourData,#{}),
+				 usersub=Subs
 				},
 	case Recalc of
 		sync ->
@@ -260,6 +202,112 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 			done;
 		false -> 
 			{ok, State}
+	end.
+
+preprocess_ddata(ID,UnixHour,Recalc,LP) ->
+	PLPDs=if Recalc==false -> 
+				 case mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,ID,hour,UnixHour}) of
+					 {Term1} when is_tuple(Term1) -> 
+						 try 
+							 PLpdi=mng:m2proplist(Term1),
+							 case proplists:get_value(data,PLpdi) of 
+								 Listpdi when is_list(Listpdi) ->
+									 PLpdS0=[ mng:m2proplist(X) || X<-Listpdi ],
+									 [ {proplists:get_value(dt,X),X} || X<-PLpdS0 ];
+								 undefined -> 
+									 []
+							 end
+						 catch Ex:Ey ->
+								   lager:notice("Can't parse ~p ~p",[{Ex,Ey},Term1]),
+								   []
+						 end;
+					 _ -> [] %proplists:get_value(last_processed,HD,[])
+				 end;
+			 true -> []
+		  end,
+	case LP of
+		{XpT,XpL} ->
+			case PLPDs of 
+				[] ->
+					[{XpT,XpL}];
+				[{XpT,_}|_] ->
+					[];
+				[_|_] ->
+					[{XpT,XpL}]
+			end;
+		_ -> []
+	end ++ PLPDs.
+
+
+preprocess_rawdata(ID,IMEI,UnixHour,Recalc,Dict) ->
+	SourceRawData=case mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,ID,hour,UnixHour}) of
+					  {Term} when is_tuple(Term) -> 
+						  mng:m2proplist(Term);
+					  {} -> 
+						  case mng:find_one(mongo,<<"rawdata">>,{type,rawdata,imei,IMEI,hour,UnixHour}) of
+							  {Term} when is_tuple(Term) -> 
+								  lager:info("Case 2 found"),
+								  mng:update(mongo,<<"rawdata">>,
+											 {type,rawdata,imei,IMEI,hour,UnixHour},
+											 {device, ID}),
+								  mng:m2proplist(Term);
+							  _ -> []
+						  end;
+
+					  _ -> []
+				  end,
+	lager:info("ID ~p",[mng:id2hex(proplists:get_value('_id',SourceRawData))]),
+	case proplists:get_value(raw,SourceRawData) of 
+		List when is_list(List) ->
+			F=fun(Point,{Imin,Imax})-> 
+					  case proplists:get_value(dt,Point) of 
+						  V when is_integer(V) -> 
+							  {
+							   case Imin of 
+								   undefined -> V;
+								   _ when Imin > V -> V;
+								   _ -> Imin 
+							   end,
+							   case Imax of 
+								   undefined -> V;
+								   _ when Imax < V -> V;
+								   _ -> Imax 
+							   end 
+							  };
+						  _ -> {Imin, Imax} 
+					  end
+			  end,
+			Points=[ mng:m2proplist(X) || X<-List ],
+			{MinTime,MaxTime}= lists:foldl(F, {undefined,0}, Points ),
+			%lager:error("min ~p",[MinTime]),
+			StartHour=UnixHour*3600,
+			EndHour=(UnixHour+1)*3600,
+			History=[ {proplists:get_value(dt,X),X} || X<-Points ],
+			NewHistory=if Recalc =/= false -> %recalc or sync
+							 PreLast=fetch_last(ID,UnixHour-1,MinTime),
+							 case PreLast of
+								 {new, NewPoint} ->
+									 %lager:info("FL ~p",[PreLast]),
+									 FilterFun=fun({Time,_Data}) ->
+													   %if Time >= StartHour andalso EndHour > Time -> ok
+													   %true -> lager:info("Drop point ~p",[_Data])
+													   %end,
+													   Time >= StartHour andalso EndHour > Time
+											   end,
+									 FPoints=lists:filter(FilterFun,History),
+									 %lager:info("Add point ~p",[NewPoint]),
+									 %lists:keysort(1,[{proplists:get_value(dt,NewPoint),NewPoint}| FPoints]);
+									 [{proplists:get_value(dt,NewPoint),NewPoint}| FPoints];
+								 _ ->
+									 History
+							 end;
+						 true ->  %no recalc
+							  History
+					  end,		
+			D1=dict:store(lastdump,time_compat:erlang_system_time(seconds),Dict),
+			{MaxTime, NewHistory, UnixHour, D1};
+		undefined -> 
+			{0, [], 0, Dict}
 	end.
 
 init([ID]) ->
@@ -520,7 +568,7 @@ dump_stat(State, Force) ->
 	LastSec=time_compat:erlang_system_time(seconds)-LastDump,
 	case (Force>0) orelse (LastSec > 300) of 
 		true ->
-			lager:debug("Device ~p dumping to mongodb....",[State#state.id]),
+			%lager:info("Device ~p dumping to mongodb....",[State#state.id]),
 			Disorder=case dict:find(disorder, State#state.data) of
 						 {ok, true} -> true;
 						 _ -> false
@@ -541,7 +589,7 @@ dump_stat(State, Force) ->
 							hour,State#state.chour},
 						   {raw,HR1,done,1}
 						  ),
-			%lager:info("HR1 ~p = ~p",[HR1,MngRes]),
+			%lager:info("Save raw history ~p = ~p",[HR1,_MngRes]),
 			PHR=case State#state.history_processed of
 					M1 when is_list(M1) -> 
 					   if Disorder ->
@@ -1099,6 +1147,10 @@ process_ds(List0,State,Recalc) ->
 		throw:badpos ->
 			lager:info("Car ~p Bad position in packet ~p",[State#state.id, List0]),
 			dump_stat(State);
+		error:{badrecord,incfg} ->
+			lager:info("Car ~p reloading config due to structure changes",[State#state.id]),
+			gen_server:cast(self(),reload_settings),
+			State;
 		GClass:GErr ->
 			lager:error("Car ~p ds error: ~p:~p",
 						[State#state.id, GClass, GErr]),
@@ -1566,6 +1618,7 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
 					lists:keystore(X#incfg.variable, 1, Acc, 
 								   { X#incfg.variable, PreVal+VFVal })
 			end,
+			%lager:info("Acc ~p,~n NewAcc ~p",[Acc,NewAcc]),
 			%{bin,Offset,Len} -> 
 			%lager:info("Binary ~p offset ~p len ~p",
 			%		[X#incfg.dsname, Offset, Len]),
@@ -1675,4 +1728,20 @@ test(sorter) ->
 	Test3(),
 	ok.
 
+
+fetch_last(DeviceID,Hour,MyLast) ->
+	try
+		{PL}=mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,DeviceID,hour,Hour}),
+		Raw=mng:m2proplist(lists:last( proplists:get_value(raw, mng:m2proplist(PL)))),
+		case proplists:get_value(dt, Raw) > MyLast of 
+			true ->
+%				{PLD}=mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,DeviceID,hour,Hour}),
+%				DD=mng:m2proplist(lists:last( proplists:get_value(data, mng:m2proplist(PLD)))),
+				{new, Raw };
+			false ->
+				nonew
+		end
+	catch _:_ ->
+			  error
+	end.
 
