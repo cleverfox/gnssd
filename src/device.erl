@@ -256,7 +256,7 @@ preprocess_rawdata(ID,IMEI,UnixHour,Recalc,Dict) ->
 
 					  _ -> []
 				  end,
-	lager:info("ID ~p",[mng:id2hex(proplists:get_value('_id',SourceRawData))]),
+	%lager:info("ID ~p",[mng:id2hex(proplists:get_value('_id',SourceRawData))]),
 	case proplists:get_value(raw,SourceRawData) of 
 		List when is_list(List) ->
 			F=fun(Point,{Imin,Imax})-> 
