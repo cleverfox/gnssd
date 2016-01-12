@@ -1,0 +1,9 @@
+{application, exporter,
+ [
+  {description, "GNSS data exporter"},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [kernel, stdlib, lager, inets, ranch, rabbit_common, amqp_client]},
+  {mod, { exporter_app, []}},
+  {env, []}
+ ]}.
