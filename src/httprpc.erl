@@ -28,7 +28,9 @@ init([]) ->
 											 {"/bapi/path/:device/current", httprpc_curpath, []},
 											 {"/api/path/:device/current", httprpc_curpath, []},
 											 {"/bapi/test/:device/:t1/:t2", httprpc_notfound, []}
-											]}
+											] ++ 
+									   httprpc_export:routes()
+									  }
 									 ]),
 	cowboy:stop_listener(gnsshttp_listener),
 	{ok, Server} = cowboy:start_http(gnsshttp_listener, 100,

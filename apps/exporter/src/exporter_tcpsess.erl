@@ -47,8 +47,9 @@ init([]) ->
 init(ListenerPid, Socket, Transport, Opts) ->
 	ok = proc_lib:init_ack({ok, self()}),
 	ok = ranch:accept_ack(ListenerPid),
-	ok = Transport:setopts(Socket, [{active, once},{packet,0}]),
+	ok = Transport:setopts(Socket, [{active, once},{packet,2}]),
 	lager:info("Accept ~p ~p ~p ~p",[ListenerPid, Socket, Transport, Opts]),
+	Transport:send(Socket, <<"\r\nGNSSd exporter. Binary protocol. Header 16bit with network byte order.\r\nv 0.1\r\n">>),
 	gen_server:enter_loop(?MODULE, [],
 						  #state{
 							 socket=Socket, 
@@ -65,7 +66,7 @@ handle_cast(_Msg, State) ->
 
 handle_info({tcp, Socket, <<"quit",_/binary>>}, State=#state{
 		socket=Socket, transport=Transport}) ->
-	Transport:send(Socket, <<"good bye\r\n">>),
+	Transport:send(Socket, <<"good bye">>),
 	Transport:close(Socket),
     {stop, normal, State};
 
@@ -73,8 +74,7 @@ handle_info({tcp, Socket, Data},
 			State=#state{ socket=Socket, transport=Transport}) ->
 	lager:info("Recvd ~p",[Data]),
 	try 
-		[StripRN|_]=binary:split(Data,<<"\r">>,[global]),
-		Cmd=case binary:split(StripRN,<<":">>,[global]) of
+		Cmd=case binary:split(Data,<<":">>,[global]) of
 			[Token, <<"get">> , Arg] ->
 				{get,Token,binary_to_integer(Arg)};
 			[<<"confirm">>, Arg] ->
@@ -88,11 +88,11 @@ handle_info({tcp, Socket, Data},
 		Transport:setopts(Socket, [{active, once}]),
 		{noreply, State2}
 	catch throw:badproto ->
-			  Transport:send(Socket, <<"bad command\r\n">>),
+			  Transport:send(Socket, <<"bad command">>),
 			  Transport:close(Socket),
 			  {stop, normal, State};
 		  Ec:Ee ->
-			  Transport:send(Socket, <<"broken protocol\r\n">>),
+			  Transport:send(Socket, <<"broken protocol">>),
 			  Transport:close(Socket),
 			  lager:error("Error ~p:~p",[Ec,Ee]),
 			  {stop, normal, State}
@@ -118,7 +118,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 process_cmd({flush,Chan}, OState) ->
-	QName= <<"test_queue">>,
+	QName= <<"export.",Chan/binary>>,
 	CState = case OState#state.amqp_chan of
 				 undefined -> amqpconnect(OState);
 				 _ ->
@@ -139,7 +139,7 @@ process_cmd({flush,Chan}, OState) ->
 
 process_cmd({get,Chan, N}, OState) ->
 	lager:info("Get ~p ~p",[Chan,N]),
-	QName= <<"test_queue">>,
+	QName= <<"export.",Chan/binary>>,
 	CState = case OState#state.amqp_chan of
 				 undefined -> amqpconnect(OState);
 				 _ ->
@@ -149,6 +149,7 @@ process_cmd({get,Chan, N}, OState) ->
 			 end,
 	Declare = #'queue.declare'{queue = QName, durable=true},
 	#'queue.declare_ok'{} = amqp_channel:call(CState#state.amqp_chan, Declare),
+	put(first,1),
 	R=lists:filtermap(
 		fun(_) ->
 				Get = #'basic.get'{queue = QName},
@@ -158,13 +159,21 @@ process_cmd({get,Chan, N}, OState) ->
 															 payload=Content
 															}} ->
 						%amqp_channel:cast(Channel, #'basic.ack'{delivery_tag = Tag});
-						{true,{Tag,<<Content/binary,",">>}};
+						{true,{Tag,
+							   case get(first) of
+								   1 -> put(first,0),
+										Content;
+								   _ ->
+									   <<",\n",Content/binary>>
+							   end
+							  }
+						};
 					{'basic.get_empty',<<>>} ->
 						false
 				end
 		end, lists:seq(1,N)),
 	{Tags,Data}=lists:unzip(R),
-	ToSend= <<"[\n",(erlang:iolist_to_binary(Data))/binary,"null\n]\n">>,
+	ToSend= <<"[\n",(erlang:iolist_to_binary(Data))/binary,"\n]\n">>,
 	(CState#state.transport):send(CState#state.socket, ToSend),
 	erlang:garbage_collect(self()),
 	CState#state{

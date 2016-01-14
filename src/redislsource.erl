@@ -90,6 +90,18 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({reload, IMEI}, State) ->
+	try
+	case imei2deviceID(binary_to_list(IMEI),State#state.imeicache,true) of
+		{ok, _, _, Dict2} -> 
+			{noreply, State#state{imeicache=Dict2}};
+		{error, _, Dict2} ->
+			{noreply, State#state{imeicache=Dict2}}
+	end
+	catch _:_ ->
+			{noreply, State}
+	end;
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -103,26 +115,40 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-imei2deviceID(IMEI,Dict) ->
-	T=case dict:find(IMEI, Dict) of
-		{ok, {ID, Time}} ->
-			case (time_compat:erlang_system_time(seconds)-Time)<600 of
-				true -> 
-					{ok, ID};
-				false ->
-					error
-			end;
-		_ ->
-			error
-	end,
+imei2deviceID(IMEI,Dict,Force) ->
+	T=if Force==true -> 
+			 lager:error("Flushing cache for ~p",[IMEI]),
+			 error;
+		 true ->
+			 case dict:find(IMEI, Dict) of
+				 {ok, {ID, Time}} ->
+					 case (time_compat:erlang_system_time(seconds)-Time)<600 of
+						 true -> {ok, ID, []};
+						 false -> error
+					 end;
+				 {ok, {ID, Exportsi, Time}} ->
+					 case (time_compat:erlang_system_time(seconds)-Time)<600 of
+						 true -> {ok, ID, Exportsi};
+						 false -> error
+					 end;
+				 _ ->
+					 error
+			 end
+	  end,
 	case T of 
-		{ok, MID} ->
-			{ok, MID, Dict};
+		{ok, MID, Exports} ->
+			{ok, MID, Exports, Dict};
 		error ->
 			case psql:equery("select id from devices where imei=$1",[IMEI]) of
-				{ok,_Hdr,[{Data}]} ->
-					D2=dict:store(IMEI,{Data,time_compat:erlang_system_time(seconds)},Dict),
-					{ok, Data, D2};
+				{ok,_,[{DevID}]} ->
+					Tokens=case psql:equery("select token from export_subs where device_id =$1",[DevID]) of
+						{ok,_,Tok} ->
+								   lists:map(fun({EX}) -> EX end, Tok);
+						_ ->
+							[]
+					end,
+					D2=dict:store(IMEI,{DevID,Tokens,time_compat:erlang_system_time(seconds)},Dict),
+					{ok, DevID, Tokens, D2};
 				_ -> {error, none, Dict}
 			end
 	end.
@@ -180,20 +206,25 @@ handle_info(pull, State) ->
 	{SumSp,CntSp}=lists:foldl(fun(E,{Su,Cn}) ->
 									  {Su+E,Cn+1}
 							  end, {0,0}, NSpd),
+	ICount=binary_to_integer(Count),
+	ITime=time_compat:erlang_system_time(nano_seconds),
+	{CLen,CTime}=case put(clen,{ICount,ITime}) of
+					 {OIC,OIT} -> {OIC,OIT};
+					 _ -> {ICount, ITime}
+		 end,
 	if PopRest < PopLimit ->
-		   ICount=binary_to_integer(Count),
-		   lager:info("Reqs: ~p. ~p/sec (~p/sec avg). In queue ~p (~p min)",[PopLimit-PopRest,Speed,SumSp/CntSp,ICount,trunc(ICount/Speed/60)]);
+		   lager:info("Reqs: ~p in ~p. ~p/sec (~p/sec avg). In queue ~p (~p min) ~p ~p",
+					  [PopLimit-PopRest,
+					   ((T2-T1)/1000000) ,Speed,SumSp/CntSp,ICount,trunc(ICount/Speed/60),
+					   ICount-CLen+(PopLimit-PopRest),(ITime-CTime)/1000000000
+					  ]);
 	   true ->
 		   ok 
 	end,
 
-	Timeout=case Count of 
-				0 -> 
-					5000;
-				<<"0">> -> 
-					5000;
-				_ -> 
-					10
+	Timeout=case ICount of 
+				0 -> 5000;
+				_ -> 1
 	end,
 	{noreply,
 	 NewState#state{
@@ -246,23 +277,36 @@ popmsg(W, State, Rest) ->
 					   {struct,List} when is_list(List) ->
 						   case proplists:lookup(<<"imei">>,List) of
 							   {<<"imei">>, IMEIb} ->
-								   %lager:info("Ok, imei is ~p",[IMEIb]),
-									case imei2deviceID(binary_to_list(IMEIb),State#state.imeicache) of
-										{ok, ID, Dict2} -> 
+								   CT=time_compat:erlang_system_time(nano_seconds)/1000000,
+								   case imei2deviceID(binary_to_list(IMEIb),State#state.imeicache,false) of
+										{ok, ID, ExpTokens, Dict2} -> 
+										   if ExpTokens == [] ->
+												  ok;
+											  true ->
+												  gen_server:cast(dexport,{send,ExpTokens,[Payload]})
+										   end,
 											%flogger:log("log/source/"++binary_to_list(IMEIb)++".log", Payload),
-											case global:whereis_name({device,ID}) of
+											TR=case global:whereis_name({device,ID}) of
 												undefined -> 
 													case supervisor:start_child(dev_sup,[ID]) of
 														{ok,Pid} -> 
 															%flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [start,Pid,Payload]),
-															gen_server:cast(Pid,{ds, List});
+															gen_server:cast(Pid,{ds, List}),
+															start;
 														Any -> 
 															lager:error("Can't start device: ~p",[Any]),
-															flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [cantstart,Payload])
+															flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [cantstart,Payload]),
+															nostart
 													end;
 												Pid ->
 													%flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [exists,Pid,Payload]),
-													gen_server:cast(Pid,{ds, List})
+													gen_server:cast(Pid,{ds, List}),
+													cast
+											end,
+											CT2=time_compat:erlang_system_time(nano_seconds)/1000000,
+											if (CT2-CT) > 1000 ->
+												   lager:info("Ok, imei is ~s ~p ms ~p",[IMEIb,(CT2-CT),TR]);
+											   true -> ok
 											end,
 											State#state{imeicache=Dict2};
 										_ -> 

@@ -26,6 +26,11 @@ init([]) ->
 	{ok, {
 	   {one_for_one, 5, 10}, 
 	   [
+		{   gs_exporter,
+			{dexport,start_link, [] },
+			permanent, 5000, worker, 
+			[]
+		},
 		{   tcpserver_ranch,
 			{ranch,start_listener, [
 									tcpexporter_pool,
