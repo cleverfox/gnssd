@@ -1,10 +1,29 @@
 [
+{exporter, [
+	{amqp_host, "fc00:100::5"}
+]},
 {gnssd, [
 	{redis, {"localhost", 6379}},
-	{pgsql, {{8193,1660,864,33,0,0,0,219},"gnss","gnss",""}},
-	{mongodb, [ {host, "100.64.0.7"}, {port, 27017}, {database, <<"test">>} ]},
+	{pgsql, {{64512,1660,896,258,219,0,0,256},"gnss","gnss",""}}, %new test
+	%{pgsql, {{10,0,0,5},"gnss","gnss",""}}, %ok
+	{mongodb, [ {host, "172.20.11.29"}, {port, 27017}, {database, <<"gnss">>} ]},
 	{redis_subscribe, {<<"push:*">>,<<"push:">>}},
-	{pushstream, {"http://localhost/pub?id="}}
+	{pushstream, {"http://localhost/pub?id="}},
+	{pgsql_workers, 50},
+	{mongo_workers, 200},
+	{redis_workers, 30}
+]},
+{gnss_gen, [
+	{redis, {"localhost", 6379}},
+	{pgsql, {{64512,1660,864,33,0,0,0,219},"gnss","gnss",""}}
+]},
+{gnss_srv, [
+	{redis, {"localhost", 6379}}
+]},
+{gnss_aggr, [
+	{redis, {"localhost", 6379}},
+	%{mongodb, [ {host, "fc00:67c:380:102:db::100"}, {port, 27017}, {database, <<"gnss">>} ]},
+	{mongodb, [ {host, "172.20.11.29"}, {port, 27017}, {database, <<"gnss">>} ]}
 ]},
 {lager, [
 	{handlers, [
@@ -17,21 +36,24 @@
 			{count, 5}
 		]},
 		{lager_file_backend, [
-			{file,"log/debug.log"},
-			{level, debug},
-			{size, 10485760},
-			{date, "$D0"},
-			{count, 5}
-		]},
-		{lager_file_backend, [
 			{file,"log/console.log"},
 			{level, info},
 			{size, 10485760},
 			{date, "$D0"},
 			{count, 5}
 		]}
-		]}
 	]}
-	].
-
+]},
+{kernel,[
+	{inet_dist_listen_min, 14730},
+	{inet_dist_listen_max, 14739}
+]},
+{sasl, [
+	{sasl_error_logger, {file, "log/sasl-error.log"}},
+	{errlog_type, error},
+	{error_logger_mf_dir, "log/sasl"},      % Log directory
+	{error_logger_mf_maxbytes, 10485760},   % 10 MB max file size
+	{error_logger_mf_maxfiles, 5}           % 5 files max
+]}
+].
 
