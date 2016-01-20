@@ -198,7 +198,7 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 										   process_ds(X,St, true)
 								   end
 						   end, State, State#state.history_raw),
-			dump_stat(S1,2),
+			dump_stat(S1,eoh),
 			done;
 		false -> 
 			{ok, State}
@@ -402,7 +402,8 @@ b2a(X) when is_binary(X) ->
 	list_to_atom(binary_to_list(X)). 
 
 handle_cast({stop, Reason}, State) ->
-	S=dump_stat(State,1),
+	S=dump_stat(State,true),
+	recalc_ifneeded(State),
 	{stop, Reason, S};
 
 handle_cast({ds, List}, State) ->
@@ -417,7 +418,14 @@ handle_cast({ds, List, TTL}, State) ->
 	ds(List,State, TTL);
 
 handle_cast(dump, State) ->
-	{noreply, dump_stat(State,1)};
+	{noreply, dump_stat(State,true)};
+
+handle_cast(needrecalc, State) ->
+	{noreply, 
+	 State#state{
+	   data= dict:store(recalc, true, State#state.data)
+	  }
+	};
 
 handle_cast({sub, SType}, State) ->
 	Type=case SType of
@@ -517,11 +525,11 @@ handle_info(recalc_begin, State) ->
 								   process_ds(X,St, true)
 						   end
 				end, State, State#state.history_raw),
-	S2=dump_stat(S1,1),
+	S2=dump_stat(S1,true),
 	{stop, normal, S2};
 
 handle_info({stop, Reason}, State) ->
-	S=dump_stat(State,1),
+	S=dump_stat(State,true),
 	{stop, Reason, S};
 
 handle_info(_Info, State) ->
@@ -557,7 +565,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 dump_stat(State) ->
-	dump_stat(State, 0).
+	dump_stat(State, false).
 
 dump_stat(State, Force) ->
 	LastDump=case dict:find(lastdump,State#state.data) of
@@ -566,14 +574,14 @@ dump_stat(State, Force) ->
 				 {ok, DateTime} when is_integer(DateTime) -> DateTime
 			 end,
 	LastSec=time_compat:erlang_system_time(seconds)-LastDump,
-	case (Force>0) orelse (LastSec > 300) of 
+	case (Force =/= false) orelse (LastSec > 300) of 
 		true ->
 			%lager:info("Device ~p dumping to mongodb....",[State#state.id]),
 			Disorder=case dict:find(disorder, State#state.data) of
 						 {ok, true} -> true;
 						 _ -> false
 					 end,
-			%dict:store(disorder, false, State#state.data)
+
 			HR=case State#state.history_raw of
 				   M when is_list(M) -> 
 					   if Disorder ->
@@ -582,6 +590,33 @@ dump_stat(State, Force) ->
 					   end;
 				   _ -> []
 			   end,
+
+			case State#state.fixedhour==0 of
+				true ->
+					ok; %do nothing
+				false -> %this is old hour.
+					case dict:find(chlastpoint, State#state.data) of
+						{ok, true} -> % need recalc next one
+							case HR of
+								[] ->
+									%no data
+									ok;
+								_ ->
+									case global:whereis_name({device, State#state.id, (State#state.chour+1)}) of
+										undefined -> % no running process for next hr, enqueue
+											Bin= <<(integer_to_binary(State#state.id))/binary,":",
+												   (integer_to_binary((State#state.chour+1)*3600))/binary,":",
+												   (integer_to_binary((State#state.chour+1)*3600))/binary,":">>,
+											gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]});
+										Pid -> %there is running proc for next hr
+											%gen_server:cast(Pid,{prevhpoint, lists:last(HR)})
+											gen_server:cast(Pid,needrecalc)
+									end
+							end;
+						_ -> false %no points appended. nothing need be recalculated
+					end
+			end,
+
 			HR1=mng:proplist2tom(HR),
 			_MngRes=mng:ins_update(mongo,<<"rawdata">>,
 						   {type,rawdata,
@@ -657,15 +692,15 @@ dump_stat(State, Force) ->
 						   {type,devicedata,
 							device,State#state.id,
 							hour,State#state.chour},
-						   case Force == 2 of
-							   true ->
+						   case Force of
+							   eoh ->
 								   {data,PHR1,eoh,true,lastupdate,Time};
 							   _ -> 
 								   {data,PHR1,lastupdate,Time}
 						   end ),
 			lager:debug("Car ~p InsUp ~p",[State#state.id,mng:id2hex(IUID)]),
-			case Force > 1 of
-				true ->
+			case Force of
+				eoh ->
 					JBin=iolist_to_binary(mochijson2:encode(
 											[
 											 {type,devicedata},
@@ -726,18 +761,21 @@ dump_stat(State, Force) ->
 			end,
 
 
-			State#state{data=dict:store(lastdump,time_compat:erlang_system_time(seconds),
-										dict:store(mngid,IUID,
-												   State#state.data
-												  )
-									   )
+			State#state{data=
+						dict:store(chlastpoint, false,
+								   dict:store(lastdump,time_compat:erlang_system_time(seconds),
+											  dict:store(mngid,IUID,
+														 State#state.data
+														)
+											 )
+								  )
 					   };
 		false -> 
 			State
 	end.
 
 switch_hour(State) ->
-	St1=dump_stat(State,2),
+	St1=dump_stat(State,eoh),
 	lager:info("Car ~p Switch hour ~p",[State#state.id,State#state.chour]),
 	%{LR1,LR2,LR3}=lists:last(St1#state.history_raw),
 	%Last_raw={LR1,LR2,LR3++[{prev_hour,1}]},
@@ -745,25 +783,38 @@ switch_hour(State) ->
 	%{LP1,LP2,LP3}=lists:last(St1#state.history_processed),
 	%Last_proc={LP1,LP2,LP3++[{prev_hour,1}]},
 	Last_proc=lists:last(St1#state.history_processed),
-	Disorder=case dict:find(disorder, State#state.data) of
-				 {ok, true} -> true;
-				 _ -> false
-			 end,
-	if Disorder -> 
-		   Bin= <<(integer_to_binary(State#state.id))/binary,":",
-				   (integer_to_binary(State#state.chour*3600))/binary,":",
-				   (integer_to_binary(State#state.chour*3600))/binary,":">>,
-
-		   gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]});
-	   true ->
-		   ok
-	end,
+	recalc_ifneeded(State),
 
 	St1#state{
 	  history_raw=[Last_raw],
 	  history_processed=[Last_proc],
-	  data= dict:store(disorder, false, State#state.data)
+	  data= 
+	  dict:store(chlastpoint, false,
+				 dict:store(recalc, false,
+							dict:store(disorder, false, State#state.data)
+						   )
+				)
 	 }.
+
+recalc_ifneeded(State) ->
+	Disorder=case dict:find(disorder, State#state.data) of
+				 {ok, true} -> true;
+				 _ -> false
+			 end,
+	Recalc=case dict:find(recalc, State#state.data) of
+				 {ok, true} -> true;
+				 _ -> false
+			 end,
+	if Disorder orelse Recalc -> 
+		   Bin= <<(integer_to_binary(State#state.id))/binary,":",
+				   (integer_to_binary(State#state.chour*3600))/binary,":",
+				   (integer_to_binary(State#state.chour*3600))/binary,":">>,
+
+		   gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]}),
+		   true;
+	   true ->
+		   false
+	end.
 
 
 find_raw_place(Right,Item) -> %{NewArray, PrevItem}
@@ -1124,9 +1175,11 @@ process_ds(List0,State,Recalc) ->
 							   history_raw=PHist, % ++ [{T,now(),List}], 
 							   history_processed=PrHist ++ [{T,PrData++EPrData}], 
 							   chour=UnixHour,
-							   data= dict:store(eedata, EEData,
-												dict:store(lastpos, [Lon, Lat], State#state.data)
-											   )
+							   data= dict:store(chlastpoint, true,
+										  dict:store(eedata, EEData,
+													 dict:store(lastpos, [Lon, Lat], State#state.data)
+													)
+										 )
 							  };
 						 _ ->
 							 lager:debug("Disordered packet ~p",[PrData]),
