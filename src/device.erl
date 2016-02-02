@@ -1564,125 +1564,131 @@ process_variables1(_List, _Pre, [], Acc, Errors, _Dt) ->
 	{Acc, Errors};
 
 process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
-	case proplists:get_value(X#incfg.dsname,List) of
-		undefined -> 
-			process_variables1(List, PreRaw, Rest, Acc, Errors, Dt);
-		Val0 ->
-			Val=case X#incfg.type of
-					{counter, Limit} ->
-						PVal0=proplists:get_value(X#incfg.dsname,PreRaw,undefined),
-						CntrDiff=process_counter(PVal0,Val0,Limit),
-						CntrRes=case X#incfg.limits of
-							undefined -> CntrDiff;
-							{delta,Min,Max} ->
-										if Dt>0 ->
-											   if (Min==null orelse CntrDiff >= Min*Dt) andalso 
-												  (Max==null orelse Max*Dt >= CntrDiff) ->
-													  CntrDiff;
-												  true ->
-													  null
-											   end;
-										   true ->
-											   CntrDiff
-										end;
-							_ -> CntrDiff
-						end,
-						lager:debug("Process counter ~p/~p ~p-~p ~p ~p -> ~p",
-								   [X#incfg.dsname, Dt, Val0, PVal0, CntrDiff, X#incfg.limits,CntrRes]),
-						CntrRes;
-					{bin, Off, Bits} ->
-						case Val0 of
-							null -> null;
-							false -> null;
-							_ when is_integer(Val0) ->
-								(Val0 bsr Off) band ((1 bsl Bits)-1);
-							_ -> 
-								lager:notice("Invalid data for bin: ~p",[Val0]),
-								null
-						end;
-					{ibutton, Off, Bits} ->
-						case Val0 of
-							null -> null;
-							false -> null;
-							_ when is_integer(Val0) ->
-								%lager:info("IButton ~p ~p",[X,(Val0 bsr Off) band ((1 bsl Bits)-1)]),
-								(Val0 bsr Off) band ((1 bsl Bits)-1);
-							_ -> 
-								lager:notice("Invalid data for ibutton: ~p",[Val0]),
-								null
-						end;
-					gauge ->
+	try
+		case proplists:get_value(X#incfg.dsname,List) of
+			undefined -> 
+				process_variables1(List, PreRaw, Rest, Acc, Errors, Dt);
+			Val0 ->
+				Val=case X#incfg.type of
+						{counter, Limit} ->
+							PVal0=proplists:get_value(X#incfg.dsname,PreRaw,undefined),
+							CntrDiff=process_counter(PVal0,Val0,Limit),
+							CntrRes=case X#incfg.limits of
+										undefined -> CntrDiff;
+										{delta,Min,Max} ->
+											if Dt>0 ->
+												   if (Min==null orelse CntrDiff >= Min*Dt) andalso 
+													  (Max==null orelse Max*Dt >= CntrDiff) ->
+														  CntrDiff;
+													  true ->
+														  null
+												   end;
+											   true ->
+												   CntrDiff
+											end;
+										_ -> CntrDiff
+									end,
+							lager:debug("Process counter ~p/~p ~p-~p ~p ~p -> ~p",
+										[X#incfg.dsname, Dt, Val0, PVal0, CntrDiff, X#incfg.limits,CntrRes]),
+							CntrRes;
+						{bin, Off, Bits} ->
+							case Val0 of
+								null -> null;
+								false -> null;
+								_ when is_integer(Val0) ->
+									(Val0 bsr Off) band ((1 bsl Bits)-1);
+								_ -> 
+									lager:notice("Invalid data for bin: ~p",[Val0]),
+									null
+							end;
+						{ibutton, Off, Bits} ->
+							case Val0 of
+								null -> null;
+								false -> null;
+								_ when is_integer(Val0) ->
+									%lager:info("IButton ~p ~p",[X,(Val0 bsr Off) band ((1 bsl Bits)-1)]),
+									(Val0 bsr Off) band ((1 bsl Bits)-1);
+								_ -> 
+									lager:notice("Invalid data for ibutton: ~p",[Val0]),
+									null
+							end;
+						gauge ->
 
-						%lager:info("~p (~p) limit ~p = ~p ",
-						%		   [X#incfg.dsname,X#incfg.type,X#incfg.limits,Val0]),
-						case X#incfg.limits of
-							undefined -> Val0;
-							{abs,Min,Max} ->
-								if (Min==null orelse Val0 >= Min) andalso 
-								   (Max==null orelse Max >= Val0 ) ->
-									   Val0;
-								   true ->
-									   null
-								end;
-							_ ->
-								Val0
-						end;
-					_ ->
-						lager:info("Type ~p",[X#incfg.type]),
-						Val0
+							%lager:info("~p (~p) limit ~p = ~p ",
+							%		   [X#incfg.dsname,X#incfg.type,X#incfg.limits,Val0]),
+							case X#incfg.limits of
+								undefined -> Val0;
+								{abs,Min,Max} ->
+									if (Min==null orelse Val0 >= Min) andalso 
+									   (Max==null orelse Max >= Val0 ) ->
+										   Val0;
+									   true ->
+										   null
+									end;
+								_ ->
+									Val0
+							end;
+						_ ->
+							lager:info("Type ~p",[X#incfg.type]),
+							Val0
+					end,
+
+				{VFVal,Error}=case Val of
+								  null ->
+									  {null,[]};
+								  _ when is_integer(Val) orelse is_float(Val) -> 
+									  case X#incfg.factor of
+										  1 -> {Val,[]};
+										  undefined -> {Val,[]};
+										  L when is_list(L) ->
+											  %lager:debug("Input ~w tar ~p",[X#incfg.dsname,L]),
+											  case tar(L,Val) of
+												  overflow -> {null,[{X#incfg.dsname,X#incfg.variable,tar_overflow,Val}]};
+												  underflow -> {0,[{X#incfg.dsname,X#incfg.variable,tar_underflow,Val}]};
+												  Xi when is_integer(Xi) -> {Xi, []};
+												  Xi when is_float(Xi) -> {Xi, []}
+											  end;
+										  Factor when is_integer(Factor) -> {Val * Factor, []};
+										  Factor when is_float(Factor) -> {Val * Factor,[]};
+										  _Any -> 
+											  lager:info("Factor ~p",[_Any]),
+											  {Val, [{X#incfg.dsname,X#incfg.variable,bad_factor,_Any}]}
+									  end;
+								  _ ->
+									  {null,
+									   [{X#incfg.dsname,X#incfg.variable,var_bad,Val}] 
+									  }
+							  end,
+
+				NewAcc=
+				case lists:keyfind(X#incfg.variable, 1, Acc) of
+					false ->
+						lists:keystore(X#incfg.variable, 1, Acc, 
+									   { X#incfg.variable, VFVal });
+					{_Name,PreVal0} ->
+						PreVal = if is_integer(PreVal0) ->
+										PreVal0;
+									is_float(PreVal0) ->
+										PreVal0;
+									true -> 
+										0
+								 end,
+						lists:keystore(X#incfg.variable, 1, Acc, 
+									   { X#incfg.variable, PreVal+VFVal })
 				end,
+				%lager:info("Acc ~p,~n NewAcc ~p",[Acc,NewAcc]),
+				%{bin,Offset,Len} -> 
+				%lager:info("Binary ~p offset ~p len ~p",
+				%		[X#incfg.dsname, Offset, Len]),
+				%{0 ,{X#incfg.dsname,0,0}}
+				%lager:debug("inCfg ~p Acc ~p",[X, NewAcc]),
+				%
+				process_variables1(List, PreRaw, Rest, NewAcc, Error++Errors, Dt)
+		end
 
-			{VFVal,Error}=case Val of
-							  null ->
-								  {null,[]};
-							  _ when is_integer(Val) orelse is_float(Val) -> 
-								  case X#incfg.factor of
-									  1 -> {Val,[]};
-									  undefined -> {Val,[]};
-									  L when is_list(L) ->
-										  %lager:debug("Input ~w tar ~p",[X#incfg.dsname,L]),
-										  case tar(L,Val) of
-											  overflow -> {null,[{X#incfg.dsname,X#incfg.variable,tar_overflow,Val}]};
-											  underflow -> {0,[{X#incfg.dsname,X#incfg.variable,tar_underflow,Val}]};
-											  Xi when is_integer(Xi) -> {Xi, []};
-											  Xi when is_float(Xi) -> {Xi, []}
-										  end;
-									  Factor when is_integer(Factor) -> {Val * Factor, []};
-									  Factor when is_float(Factor) -> {Val * Factor,[]};
-									  _Any -> 
-										  lager:info("Factor ~p",[_Any]),
-										  {Val, [{X#incfg.dsname,X#incfg.variable,bad_factor,_Any}]}
-								  end;
-							  _ ->
-								  {null,
-								   [{X#incfg.dsname,X#incfg.variable,var_bad,Val}] 
-								  }
-						  end,
-
-			NewAcc=
-			case lists:keyfind(X#incfg.variable, 1, Acc) of
-				false ->
-					lists:keystore(X#incfg.variable, 1, Acc, 
-								   { X#incfg.variable, VFVal });
-				{_Name,PreVal0} ->
-					PreVal = if is_integer(PreVal0) ->
-									PreVal0;
-								is_float(PreVal0) ->
-									   PreVal0;
-								true -> 
-									0
-							 end,
-					lists:keystore(X#incfg.variable, 1, Acc, 
-								   { X#incfg.variable, PreVal+VFVal })
-			end,
-			%lager:info("Acc ~p,~n NewAcc ~p",[Acc,NewAcc]),
-			%{bin,Offset,Len} -> 
-			%lager:info("Binary ~p offset ~p len ~p",
-			%		[X#incfg.dsname, Offset, Len]),
-			%{0 ,{X#incfg.dsname,0,0}}
-			%lager:debug("inCfg ~p Acc ~p",[X, NewAcc]),
-			%
-			process_variables1(List, PreRaw, Rest, NewAcc, Error++Errors, Dt)
+	catch Ec:Ee ->
+			  lager:error("Error in process_variable: ~p:~p",[Ec,Ee]),
+			  process_variables1(List, PreRaw, Rest, Acc, Errors, Dt)
 	end.
 
 
