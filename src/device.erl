@@ -1687,7 +1687,7 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
 		end
 
 	catch Ec:Ee ->
-			  lager:error("Error in process_variable: ~p:~p",[Ec,Ee]),
+			  lager:error("Error in process_variable ~p: ~p:~p",[X,Ec,Ee]),
 			  process_variables1(List, PreRaw, Rest, Acc, Errors, Dt)
 	end.
 
