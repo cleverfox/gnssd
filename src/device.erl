@@ -1631,11 +1631,11 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
 						lager:info("Type ~p",[X#incfg.type]),
 						Val0
 				end,
-			
+
 			{VFVal,Error}=case Val of
 							  null ->
 								  {null,[]};
-							  _ -> 
+							  _ when is_integer(Val) orelse is_float(Val) -> 
 								  case X#incfg.factor of
 									  1 -> {Val,[]};
 									  undefined -> {Val,[]};
@@ -1652,8 +1652,12 @@ process_variables1(List, PreRaw, [X|Rest], Acc, Errors, Dt) ->
 									  _Any -> 
 										  lager:info("Factor ~p",[_Any]),
 										  {Val, [{X#incfg.dsname,X#incfg.variable,bad_factor,_Any}]}
-						  end
-				  end,
+								  end;
+							  _ ->
+								  {null,
+								   [{X#incfg.dsname,X#incfg.variable,var_bad,Val}] 
+								  }
+						  end,
 
 			NewAcc=
 			case lists:keyfind(X#incfg.variable, 1, Acc) of
