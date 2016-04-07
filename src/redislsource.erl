@@ -290,7 +290,7 @@ popmsg(W, State, Rest) ->
 												undefined -> 
 													case supervisor:start_child(dev_sup,[ID]) of
 														{ok,Pid} -> 
-															%flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [start,Pid,Payload]),
+															flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [start,Pid,Payload]),
 															gen_server:cast(Pid,{ds, List}),
 															start;
 														Any -> 
@@ -299,7 +299,7 @@ popmsg(W, State, Rest) ->
 															nostart
 													end;
 												Pid ->
-													%flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [exists,Pid,Payload]),
+													flogger:log("log/source/dev_"++integer_to_list(ID)++".log", [exists,Pid,Payload]),
 													gen_server:cast(Pid,{ds, List}),
 													cast
 											end,
