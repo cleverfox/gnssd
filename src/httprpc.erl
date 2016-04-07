@@ -34,7 +34,7 @@ init([]) ->
 									 ]),
 	cowboy:stop_listener(gnsshttp_listener),
 	{ok, Server} = cowboy:start_http(gnsshttp_listener, 100,
-								[{port, 8001}],
+								[{port, application:get_env(gnssd,httprpc_port,8001)}],
 								[
 								 {env, [{dispatch, Dispatch}]},
 								 {onresponse, fun error_hook/4}
