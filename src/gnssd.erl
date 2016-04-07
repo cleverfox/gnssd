@@ -54,11 +54,13 @@ init([]) ->
 					   lager:error("Can't get mongoDB configuration"),
 					   []
 			   end,
-	{RedisHost,RedisPort} = case application:get_env(redis) of 
+	{RedisHost,RedisPort,RedisDB} = case application:get_env(redis) of 
 					{ok, {RHost, RPort} } ->
-						{RHost,RPort};
+						{RHost,RPort,0};
+					{ok, {RHost, RPort, DBN} } ->
+						{RHost,RPort,DBN};
 					_ ->
-						{"127.0.0.1",6379}
+						{"127.0.0.1",6379,0}
 				end,
 	{SubChan,StripChan} = case application:get_env(redis_subscribe) of 
 					{ok, {XSub, XStrip} } ->
@@ -86,7 +88,8 @@ init([]) ->
 				     {max_overflow,20}
 				    ],
 				    [ {host, RedisHost}, 
-				      {port, RedisPort}
+				      {port, RedisPort},
+					  {database, RedisDB}
 				    ] 
 				   ]}, 
 	       permanent, 5000, worker,
