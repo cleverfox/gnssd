@@ -376,6 +376,15 @@ handle_call(get_path, _From, State) ->
 				  end, State#state.history_processed),
 	{reply, Res, State};
 
+handle_call(get_latest_point, _From, State) ->
+	Res=try
+			{_,Point}=lists:last(State#state.history_raw),
+			Point
+		catch _:_ ->
+				  error
+		end,
+	{reply, Res, State};
+
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
@@ -530,6 +539,7 @@ handle_info(recalc_begin, State) ->
 
 handle_info({stop, Reason}, State) ->
 	S=dump_stat(State,true),
+	recalc_ifneeded(State),
 	{stop, Reason, S};
 
 handle_info(_Info, State) ->
@@ -604,12 +614,23 @@ dump_stat(State, Force) ->
 								_ ->
 									case global:whereis_name({device, State#state.id, (State#state.chour+1)}) of
 										undefined -> % no running process for next hr, enqueue
+											lager:debug("run recalc for ~p ~p in background",
+													   [
+														State#state.id, 
+														(State#state.chour+1)
+													   ]),
 											Bin= <<(integer_to_binary(State#state.id))/binary,":",
 												   (integer_to_binary((State#state.chour+1)*3600))/binary,":",
 												   (integer_to_binary((State#state.chour+1)*3600))/binary,":">>,
 											gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]});
 										Pid -> %there is running proc for next hr
 											%gen_server:cast(Pid,{prevhpoint, lists:last(HR)})
+											lager:debug("shedule recalc for ~p ~p after proc ~p finishes ",
+													   [
+														State#state.id, 
+														(State#state.chour+1),
+														Pid
+													   ]),
 											gen_server:cast(Pid,needrecalc)
 									end
 							end;
@@ -1025,7 +1046,7 @@ process_ds(List0,State,Recalc) ->
 			lager:debug("Car ~p agg ~p",[State#state.id,PrData]),
 
 			NewState=case T > State#state.last_ptime of
-						 true ->
+						 true -> %this is a fresh point, process it imeediate
 							 UserPIlst=lists:usort([
 													{ S#usersub.pi_name, S#usersub.params } || 
 													S <- State#state.usersub,
@@ -1181,7 +1202,7 @@ process_ds(List0,State,Recalc) ->
 													)
 										 )
 							  };
-						 _ ->
+						 _ -> %disordered point, process late
 							 lager:debug("Disordered packet ~p",[PrData]),
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
@@ -1793,18 +1814,37 @@ test(sorter) ->
 
 
 fetch_last(DeviceID,Hour,MyLast) ->
-	try
-		{PL}=mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,DeviceID,hour,Hour}),
-		Raw=mng:m2proplist(lists:last( proplists:get_value(raw, mng:m2proplist(PL)))),
-		case proplists:get_value(dt, Raw) > MyLast of 
-			true ->
-%				{PLD}=mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,DeviceID,hour,Hour}),
-%				DD=mng:m2proplist(lists:last( proplists:get_value(data, mng:m2proplist(PLD)))),
-				{new, Raw };
-			false ->
-				nonew
-		end
-	catch _:_ ->
-			  error
+	case global:whereis_name({device, DeviceID, Hour}) of
+		undefined ->
+			lager:debug("requesting new point for ~p ~p my last ~p",[DeviceID,Hour,MyLast]),
+			try
+				{PL}=mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,DeviceID,hour,Hour}),
+				Raw=mng:m2proplist(lists:last( proplists:get_value(raw, mng:m2proplist(PL)))),
+				case proplists:get_value(dt, Raw) > MyLast of 
+					true ->
+						lager:debug("found new point for ~p ~p ~p",[DeviceID,Hour,Raw]),
+						%{PLD}=mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,DeviceID,hour,Hour}),
+						%DD=mng:m2proplist(lists:last( proplists:get_value(data, mng:m2proplist(PLD)))),
+						{new, Raw };
+					false ->
+						lager:debug("not found new point for ~p ~p ~p ~p",[DeviceID,Hour,MyLast,proplists:get_value(dt, Raw)]),
+						nonew
+				end
+			catch _:_ ->
+					  error
+			end;
+		PID ->
+			case gen_server:call(PID, get_latest_point) of
+				Raw when is_list(Raw) ->
+					lager:debug("Got latest ~p directly from worker ~p",[Raw,PID]),
+					case proplists:get_value(dt, Raw) > MyLast of 
+						true ->
+							{new, Raw};
+						false ->
+							nonew
+					end;
+				_Any ->
+					error
+			end
 	end.
 
