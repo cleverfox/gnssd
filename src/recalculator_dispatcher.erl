@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/3, recalc/1, recalc/2]).
+-export([start_link/3, recalc/1, recalc/2, uniq_list/2, append_tasks/4, test_ul/0, poptasks/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -16,7 +16,8 @@
 -record(state, {redispid,
 				chan,
 				max_worker=50,
-				timer
+				timer,
+				reclist
 			   }).
 
 %%%===================================================================
@@ -98,9 +99,24 @@ init([Host, Port, Chan]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call({max_workers, N}, _From, State) ->
+	{reply, State#state.max_worker, State#state{max_worker=N}};
+
+handle_call(status, _From, State) ->
+	try
+		Devlist=maps:keys(State#state.reclist),
+		Res=lists:foldl(fun(Dev,{Devs,Hours}) ->
+								{Devs+1,length(maps:get(Dev,State#state.reclist))+Hours}
+					end,{0,0},Devlist),
+		{reply, Res, State}
+	catch Ec:Ee ->
+			  {reply, {error, Ec,Ee}, State}
+	end;
+
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -134,6 +150,7 @@ handle_cast(run_queue, State) ->
 		_ -> 
 			ok
 	end,
+	NewTasks = poptasks(State#state.reclist),
 
 	AllowRun=case proplists:get_value(workers,supervisor:count_children(recalculator_sup)) of
 				 undefined -> 
@@ -146,75 +163,35 @@ handle_cast(run_queue, State) ->
 	lager:debug("Allow run ~p",[AllowRun]),
 	S2=case AllowRun of
 		   false -> 
-			   State#state{timer=erlang:send_after(10000,self(),run_queue)};
+			   State#state{timer=erlang:send_after(2000,self(),run_queue),reclist=NewTasks};
 		   true  -> 
-
-			   NormalFun=fun(Worker) -> 
-								 eredis:q(Worker, [ "rpop", "recalc" ])
-						 end,
-			   L=case poolboy:transaction(redis, NormalFun) of 
-					 {ok,undefined} -> 
-						 false;
-					 {ok, RecvdData } -> 
-						 try
-							 [BDev,BStart,BEnd,Aggs|Rest]=binary:split(RecvdData,[<<":">>],[global]),
-							 UserID=case Rest of 
-								 [XUserID|_] ->
-									 XUserID;
-								 _ -> undefined
-							 end,
-							 Dev=binary_to_integer(BDev),
-							 Start=binary_to_integer(BStart),
-							 End=binary_to_integer(BEnd),
-							 lager:info("OK, ~p ~p ~p ~p",[Dev,Start,End,Aggs]),
-							 case supervisor:start_child(recalculator_sup,[Dev,Start,End,Aggs,UserID]) of
+			   {L,Tasks}=case get_ready(NewTasks, time_compat:os_system_time(seconds)) of
+					 {none, NewTasks2} ->
+						 {false, NewTasks2};
+					 {{Dev, Hours, Users},NewTasks2} -> 
+							 lager:info("OK, ~p ~p ~p",[Dev,Hours,Users]),
+							 case supervisor:start_child(recalculator_sup,[Dev,Hours,default,Users]) of
 								 {ok, Pid} -> lager:info("Data recalculator ~p runned ~p",[Dev, Pid]),
 											  true;
 								 {error, Err} -> lager:error("Can't run data recalculator : ~p",[Err]),
 												 error
 							 end,
-							 true
-						 catch _:_ ->
-								   lager:error("Can't parse recalc string, ~p",[RecvdData]),
-								   true
-						 end;
-					 Any -> 
-						 lager:error("Error ~p",[Any]),
-						 false
-%					   try mochijson2:decode(NormalJSON) of
-%						   {struct,List} when is_list(List) ->
-%							   Key=mng:proplisttom(List),
-%							   % Non-Express
-%							   Tasks=default, %[agg_distance,agg_fuelmeter,agg_fuelgauge], 
-%							   case supervisor:start_child(recalculator_sup,[Key,Tasks]) of
-%								   {ok, Pid} -> lager:info("Data aggregator ~p runned ~p",[Key, Pid]),
-%												true;
-%								   {error, Err} -> lager:error("Can't run data aggregator: ~p",[Err]),
-%												   error
-%							   end;
-%						   _Any -> 
-%							   lager:error("Can't parse source ~p",[NormalJSON]),
-%							   error
-%					   catch
-%						   error:Err ->
-%							   lager:error("Can't parse source ~p",[Err]),
-%							   error
-%					   end
-			   end,
-
+							 {true, NewTasks2}
+				 end,
+%			   lager:info("T1 ~p T2 ~p L ~p",[NewTasks,Tasks,L]),
 			   %L: false - no more tasks, true - ok, error 
 			   case L of 
 				   true -> 
 					   gen_server:cast(self(),run_queue),
-					   State;
+					   State#state{reclist=Tasks};
 				   false -> 
-					   State#state{timer=erlang:send_after(10000,self(),run_queue)};
+					   State#state{timer=erlang:send_after(10000,self(),run_queue),reclist=Tasks};
 				   error -> 
 					   lager:error("Error ~p",[L]),
-					   State#state{timer=erlang:send_after(30000,self(),run_queue)};
+					   State#state{timer=erlang:send_after(30000,self(),run_queue),reclist=Tasks};
 				   {error,_} -> 
 					   lager:error("Error ~p",[L]),
-					   State#state{timer=erlang:send_after(30000,self(),run_queue)}
+					   State#state{timer=erlang:send_after(30000,self(),run_queue),reclist=Tasks}
 			   end
 	   end,
 	{noreply, S2};
@@ -278,3 +255,157 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+poptasks(State) ->
+	case poolboy:transaction(redis, 
+							 fun(Worker) -> 
+									 eredis:q(Worker, [ "rpop", "recalc" ])
+							 end) of 
+		{ok,undefined} -> 
+			State;
+		{ok, RecvdData } -> 
+			try
+				[BDev,BStart,BEnd,Aggs|Rest]=binary:split(RecvdData,[<<":">>],[global]),
+				UserID=case Rest of 
+						   [XUserID|_] ->
+							   XUserID;
+						   _ -> undefined
+					   end,
+				Dev=binary_to_integer(BDev),
+				Start=trunc(binary_to_integer(BStart)/3600),
+				End=trunc(binary_to_integer(BEnd)/3600),
+				lager:info("OK, ~p ~p ~p ~p",[Dev,Start,End,Aggs]),
+				poptasks(uniq_list([{Dev, Start, End, UserID}], State))
+			catch _:_ ->
+					  lager:error("Can't parse recalc string, ~p",[RecvdData]),
+					  State
+			end
+	end.
+
+
+%[BDev,BStart,BEnd,Aggs|Rest]=binary:split(RecvdData,[<<":">>],[global]),
+%Dev:Start:End:agg_list[:userid]
+uniq_list([],State) ->
+	State;
+
+uniq_list([{Device,H1,H2,UserID}|Rest],State0) ->
+%	T=time_compat:os_system_time(seconds),
+	State=if is_map(State0) -> State0;
+			 true -> #{}
+		  end,
+	DevTasks=maps:get(Device,State,[]),
+	Tasks=append_tasks(H1,H2,UserID,DevTasks),
+	
+	uniq_list(Rest,maps:put(Device,Tasks,State)).
+
+append_tasks(Hr1,Hr2,UserID,Tasks) ->
+	T=time_compat:os_system_time(seconds)+60,
+	case split_tasks(Hr1, Tasks, []) of
+		{PrevTasks, []} -> %empty tasks or all tasks older
+			PrevTasks ++ [{H, T, UserID} || H<-lists:seq(Hr1, Hr2)];
+		{PrevTasks, [{PH2,_UID}=Post1|Post]} 
+		  when Hr2 < PH2 -> %something exists but we have place
+		   PrevTasks ++ [{H, T, UserID} || H<-lists:seq(Hr1, Hr2)] ++ [Post1|Post];
+		{PrevTasks, TL } -> %need merge
+			{Middle,Post} = split_tasks(Hr2, TL, []),
+			PrevTasks ++ merge([{H, T, UserID} || H<-lists:seq(Hr1, Hr2)],Middle) ++ Post
+	end.
+
+
+merge(List1,List2) ->
+	{Merged,MaxT}=lists:foldl(fun({H, T, Owner},{Acc,MT}) ->
+						{
+						 if(is_list(Owner)) ->
+							   dict:append_list(H,Owner,Acc);
+						   true ->
+							   dict:append(H,Owner,Acc)
+						 end,
+						 if T>MT -> T;
+							true -> MT
+						 end
+						}
+				end, {dict:new(),0}, List1 ++ List2),
+	lists:keysort(1,
+				  lists:map(fun({Key,[Val]}) ->
+									{Key, MaxT, Val};
+							   ({Key,Val}) ->
+									{Key, MaxT, Val}
+							end,
+							dict:to_list(Merged)
+						   )
+				 ).
+
+split_tasks(_Hr,[],PL) ->
+		  {lists:reverse(PL),[]};
+
+split_tasks(Hr,[{H1,_,_}=Cur|Rest],PL) ->
+	if(H1<Hr) ->
+		  split_tasks(Hr, Rest, [Cur|PL]); %left task
+	  true -> 
+		  {lists:reverse(PL),[Cur|Rest]} %right task
+	end.
+
+
+check_dready([],State,_T) ->
+	{none,State};
+
+check_dready([Cur|Rest],State,T) ->
+	DM=maps:get(Cur,State),
+	case DM of 
+		[] ->
+			check_dready(Rest,maps:remove(Cur,State),T);
+		_ ->
+			case check_eready(DM, [], T) of
+				{none, _} ->
+					check_dready(Rest,State,T);
+				{{Hours, Users}, []} ->
+					{
+					 {Cur, Hours, Users}, 
+					 maps:remove(Cur, State)
+				};
+				{{Hours, Users}, NonReady} ->
+					{
+					 {Cur, Hours, Users}, 
+					 maps:put(Cur, NonReady, State)
+					}
+			end
+	end.
+
+get_ready(State0, T) ->
+	State=if is_map(State0) -> State0;
+			 true -> #{}
+		  end,
+	check_dready(maps:keys(State),State,T).
+
+aggregate(List) ->
+	{Hours,_,Users}=lists:unzip3(List),
+	{lists:usort(Hours),lists:usort(lists:flatten(Users))}.
+
+check_eready([],[],_T) ->
+	{none, []};
+
+check_eready([],ReadyList,_T) ->
+	{aggregate(ReadyList), []};
+
+check_eready([{_,T1,_}=Cur|Rest],ReadyList,T) ->
+	if(T1<T) ->
+		  check_eready(Rest,[Cur|ReadyList],T);
+	  ReadyList == [] ->
+		  {none, [Cur|Rest]};
+	  true ->
+		  {aggregate(ReadyList), [Cur|Rest]}
+	end.
+
+test_ul() ->
+	S0=uniq_list([{5,15,20,pavlik}],new),
+	timer:sleep(200),
+	S1=uniq_list([{5,28,31,ivan}],S0),
+	timer:sleep(200),
+	S2=uniq_list([{5,20,30,vovan}],S1),
+	S3=uniq_list([{5,18,25,ivan}],S2),
+
+	T=time_compat:os_system_time(seconds)+59+3,
+
+	{T, get_ready(S3, T) }.
+
+

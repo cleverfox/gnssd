@@ -33,11 +33,15 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
+start_link(CarID,List,Actions,UserID) when is_list(List) ->
+    gen_server:start_link(?MODULE, [CarID,List,Actions, UserID], []);
+
 start_link(CarID,T1,T2,Actions) ->
     gen_server:start_link(?MODULE, [CarID,T1,T2,Actions, undefined], []).
 
 start_link(CarID,T1,T2,Actions,UserID) ->
     gen_server:start_link(?MODULE, [CarID,T1,T2,Actions, UserID], []).
+
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -54,6 +58,19 @@ start_link(CarID,T1,T2,Actions,UserID) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
+init([CarID,TList,Actions,UserID]) when is_list(TList) ->
+	lager:info("Recalc ~p: ~p",[CarID,Actions]),
+	gen_server:cast(self(), run_task),
+	{ok, #state{
+			car_id=CarID,
+			actions=Actions,
+			task=TList,
+			total=length(TList),
+			done=0,
+			userid=UserID
+		   }
+	};
+
 init([CarID,T1,T2,Actions,UserID]) ->
 	H1=trunc(T1/3600),
 	H2=trunc(T2/3600),
