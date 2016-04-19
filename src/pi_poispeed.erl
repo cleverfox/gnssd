@@ -9,70 +9,146 @@ ds_process(PI_Data, Current, Hist, HState) ->  %{private permanent data, public 
 	ds_process(PI_Data, Current, Hist, HState, []).
 
 ds_process(PI_Data0, Current, _Hist, HState, _PI_Params) ->  %{private permanent data, public temporary data proplist}
+%	lager:info("-----[ ~p ]-----",[?MODULE]),
 	PI_Data=if is_map(PI_Data0) ->
 				   PI_Data0;
 			   true -> #{}
 			end,
-%	Dev=maps:get(id,HState),
+	DevID=maps:get(id,HState),
 	T=proplists:get_value(dt,Current),
 	CSpeed=proplists:get_value(sp,Current),
+	[Lon, Lat]=proplists:get_value(position, Current),
 	Org=maps:get(org_id,HState,0),
 	PI_POI_Info=maps:get(pi_poi,HState,[]),
 	Current_POIs=proplists:get_value(current_poi,PI_POI_Info,[]),
-	Cache=maps:get(poicache, PI_Data, #{}),
-	{MaxSpeed,Cache2} = min_speed(Current_POIs, Org, Cache),
-	OverSpeed=CSpeed>=MaxSpeed,
-	PreOverSpeed=maps:get(overspeed, PI_Data, false),
-	{Begin,MaxSpeeding,Finished}=if OverSpeed andalso not PreOverSpeed ->
-							%just begin
-							{
-							 T, %begin timestamp
-							 CSpeed, %max_speed
-							 maps:get(finished_overspeed, PI_Data, undefined)
-							};
-						not OverSpeed andalso PreOverSpeed ->
-							%finished,
-							{
-							 undefined,
-							 0,
-							 {
-							  maps:get(begin_over, PI_Data, undefined),
-							  T,
-							  maps:get(max_speeding, PI_Data, undefined)
-							 }
-							};
-						true ->
-							%nothing changed
-							{
-							 maps:get(begin_over, PI_Data, undefined),
-							 if OverSpeed ->
-								   case maps:get(max_speeding, PI_Data, undefined) of
-									   I when is_integer(I) andalso I > CSpeed ->
-										   I;
-									   _ -> CSpeed
-								   end;
-							   true ->
-								   undefined
-							 end,
-							 maps:get(finished_overspeed, PI_Data, undefined)
-							}
-					 end,
+	Overspeeds=maps:get(overspeeds, PI_Data, #{}),
+	{POI_Speeds, Cache2} = lists:foldl(fun(POI, {PRes, Acc}) ->
+											   {PSpeed, Acc2} = poi_speedcache(POI, Org, Acc),
+											   {
+												if PSpeed == unlimited -> PRes;
+												   true -> [{POI, PSpeed}|PRes]
+												end,
+												Acc2
+											   }
+									   end, 
+									   {[], maps:get(poicache, PI_Data, #{})}, 
+									   Current_POIs),
+	Prev_POIs=maps:keys(Overspeeds),
+	ToCheck=lists:usort(Prev_POIs++Current_POIs),
+	CheckPOIFun=fun(POI,{PRes, PState}) ->
+						Pre=maps:get(POI,Overspeeds,undefined),
+						Currently=lists:keyfind(POI,1,POI_Speeds),
+						{POIState, 
+						 Speeding, 
+						 Ev} = case {Pre, Currently} of
+								   {undefined, {POI, PSpeed}} -> %just appear
+									   NowSpeeding=CSpeed > PSpeed,
+									   {
+										maps:put(speeding,NowSpeeding,#{}), 
+										{false, NowSpeeding}, in
+									   };
+								   {_, {POI, PSpeed}} -> %still exists
+									   PS=maps:get(POI,PState,#{}),
+									   NowSpeeding=CSpeed > PSpeed,
+									   {
+										maps:put(speeding,NowSpeeding,PS), 
+										{maps:get(speeding, PS, false), NowSpeeding}, still
+									   };
+								   {_, false} -> %just disappear
+									   PS=maps:get(POI,PState,#{}),
+									   {
+										PS,
+										{maps:get(speeding, PS, false), false}, out
+									   }
+							   end,
+						{NewPRes,NewPOIState}=case Speeding of
+												  {false, true} -> %start speeding
+													  saveoverspeed(DevID, beg, T, undefined, [Lon,Lat], CSpeed),
+													  {
+													   [{POI, proplists:get_value(POI,POI_Speeds),start,
+														 #{ max => CSpeed }
+														}|PRes], 
+													   maps:put(sp_begin,T, 
+																maps:put(maxspeed,CSpeed,POIState)
+															   )
+													  };
+												  {true, false} -> %end speeding
+													  saveoverspeed(DevID, fin, maps:get(sp_begin, POIState, undefined), T, 
+																	[Lon,Lat], maps:get(maxspeed, POIState, undefined)),
+													  {
+													   [{POI,proplists:get_value(POI,POI_Speeds),fin, 
+														 #{ max => maps:get(maxspeed, POIState, undefined),
+															since => maps:get(sp_begin, POIState, undefined)
+														  } 
+														}|PRes], 
+													   POIState
+													  };
+												  {true, true} -> %still speeding
+													  PreSpeed=maps:get(maxspeed,POIState,0),
+													  MaxSpeed=if(PreSpeed < CSpeed) -> CSpeed;
+																 true -> PreSpeed
+															   end,
+													  {
+													   [{POI,proplists:get_value(POI,POI_Speeds), speeding,
+														 #{ max => maps:get(maxspeed, POIState, undefined),
+															since => maps:get(sp_begin, POIState, undefined)
+														  } 
+														}|PRes], 
+													   maps:put(maxspeed, MaxSpeed, POIState)
+													  };
+												  {false, false} -> %not speeding
+													  {
+													   if Currently == false -> %leave poi
+															  PRes;
+														  true -> 
+															  [{POI,proplists:get_value(POI,POI_Speeds),false,#{}}|PRes]
+													   end, 
+													   POIState
+													  }
+											  end,
+
+						{
+						 NewPRes, 
+						 if Ev == out -> maps:remove(POI,PState);
+							true -> maps:put(POI,NewPOIState,PState)
+						 end
+						}
+				end,
+	{Results, NewState} = lists:foldl(CheckPOIFun, {[], Overspeeds}, ToCheck),
 	{
 	 PI_Data#{ 
-	   begin_over => Begin,
-	   overspeed => OverSpeed,
-	   max_speeding => MaxSpeeding,
-	   finished_overspeed => Finished,
-	   poicache => Cache2
+	   poicache => Cache2,
+	   overspeeds => NewState
 	  }, 
-	 [
-	  {max_speed, MaxSpeed},
-	  {overspeed, OverSpeed},
-	  {max_speeding, MaxSpeeding},
-	  {overspeed_last, Finished},
-	  {overspeed_since, Begin}
-	 ]
+	 Results
 	}.
+
+saveoverspeed(DevID,beg,T1,_T2,[Lon,Lat],MaxSpeed) ->
+	R=mevent:saveevent(DevID,{
+					   list_to_binary("overspeed."++integer_to_list(T1)++".begin"), 
+					   {
+						dt,T1,
+						position,[Lon,Lat]
+					   },
+					   list_to_binary("overspeed."++integer_to_list(T1)++".maxspeed"), 
+					   MaxSpeed
+					  },T1),
+	lager:info("SaveOverspeed ~p=~p",[{DevID,beg,T1,_T2,[Lon,Lat],MaxSpeed},R]),
+					  ok;
+
+saveoverspeed(DevID,fin,T1,T2,[Lon,Lat],MaxSpeed) ->
+	R=mevent:saveevent(DevID,{
+						 list_to_binary("overspeed."++integer_to_list(T1)++".finish"), 
+						 {
+						  dt,T2,
+						  position,[Lon,Lat]
+						 },
+						 list_to_binary("overspeed."++integer_to_list(T1)++".maxspeed"), 
+						 MaxSpeed
+						},T1),
+	lager:info("SaveOverspeed ~p=~p",[{DevID,fin,T1,T2,[Lon,Lat],MaxSpeed},R]),
+	savegk(R, list_to_binary("overspeed."++integer_to_list(T1)++".finish.position_txt"), [Lon,Lat]),
+	ok.
 
 
 savegk(ID, Ev, Coords) ->
@@ -81,7 +157,7 @@ savegk(ID, Ev, Coords) ->
 		JBin=iolist_to_binary(mochijson2:encode(
 								[
 								 {id,mng:id2hex(ID)},
-								 {collection, <<"ibutton">>},
+								 {collection, <<"events">>},
 								 {ev,Ev},
 								 {coords,Coords}
 								])),
@@ -122,7 +198,6 @@ poi_speedcache(POI, Org, Cache) ->
 			{Limit, maps:put(POI, {Limit, T+3600}, Cache)}
 	end.
 
-
 get_poispeed(POI, Org) ->
 	SQL="select max_speed from poi_speed_limits where poi_id = $1 and (organisation_id=$2 or organisation_id=0) order by organisation_id desc limit 1;",
 	SQLRes=psql:equery(SQL, [POI,Org]),
@@ -135,9 +210,18 @@ get_poispeed(POI, Org) ->
 
 
 test() ->
-	{S0,_}=pi_poispeed:ds_process(0,[{dt,100},{sp,110}],[],#{pi_poi=>[{current_poi,[356]}],org_id=>1},[]),
-	{S1,_}=pi_poispeed:ds_process(S0,[{dt,200},{sp,110}],[],#{pi_poi=>[{current_poi,[357]}],org_id=>1},[]),
-	{S2,_}=pi_poispeed:ds_process(S1,[{dt,300},{sp,160}],[],#{pi_poi=>[{current_poi,[357]}],org_id=>1},[]),
-	{S3,_}=pi_poispeed:ds_process(S2,[{dt,400},{sp,190}],[],#{pi_poi=>[{current_poi,[357]}],org_id=>1},[]),
-	{S4,_}=pi_poispeed:ds_process(S3,[{dt,500},{sp,110}],[],#{pi_poi=>[{current_poi,[357,356]}],org_id=>1},[]),
-	pi_poispeed:ds_process(S4,[{dt,800},{sp,110}],[],#{pi_poi=>[{current_poi,[356]}],org_id=>1},[]).
+	P=[{position,[36,51]}],
+	{S0,T0}=pi_poispeed:ds_process(0,[{dt,100},{sp,110}|P],[],#{pi_poi=>[{current_poi,[356]}],org_id=>1,id=>100500},[]),
+	{S1,T1}=pi_poispeed:ds_process(S0,[{dt,200},{sp,110}|P],[],#{pi_poi=>[{current_poi,[357]}],org_id=>1,id=>100500},[]),
+	{S2,T2}=pi_poispeed:ds_process(S1,[{dt,300},{sp,160}|P],[],#{pi_poi=>[{current_poi,[357]}],org_id=>1,id=>100500},[]),
+	{S3,T3}=pi_poispeed:ds_process(S2,[{dt,400},{sp,190}|P],[],#{pi_poi=>[{current_poi,[357]}],org_id=>1,id=>100500},[]),
+	{S4,T4}=pi_poispeed:ds_process(S3,[{dt,500},{sp,110}|P],[],#{pi_poi=>[{current_poi,[357,356]}],org_id=>1,id=>100500},[]),
+	{S5,T5}=pi_poispeed:ds_process(S4,[{dt,800},{sp,110}|P],[],#{pi_poi=>[{current_poi,[356]}],org_id=>1,id=>100500},[]),
+	io:format("T0 ~p~n",[T0]),
+	io:format("T1 ~p~n",[T1]),
+	io:format("T2 ~p~n",[T2]),
+	io:format("T3 ~p~n",[T3]),
+	io:format("T4 ~p~n",[T4]),
+	io:format("T5 ~p~n",[T5]),
+	S5.
+
