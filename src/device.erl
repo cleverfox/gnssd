@@ -601,42 +601,45 @@ dump_stat(State, Force) ->
 				   _ -> []
 			   end,
 
-			case State#state.fixedhour==0 of
-				true ->
-					ok; %do nothing
-				false -> %this is old hour.
-					case dict:find(chlastpoint, State#state.data) of
-						{ok, true} -> % need recalc next one
-							case HR of
-								[] ->
-									%no data
-									ok;
-								_ ->
-									case global:whereis_name({device, State#state.id, (State#state.chour+1)}) of
-										undefined -> % no running process for next hr, enqueue
-											lager:debug("run recalc for ~p ~p in background",
-													   [
-														State#state.id, 
-														(State#state.chour+1)
-													   ]),
-											Bin= <<(integer_to_binary(State#state.id))/binary,":",
-												   (integer_to_binary((State#state.chour+1)*3600))/binary,":",
-												   (integer_to_binary((State#state.chour+1)*3600))/binary,":">>,
-											gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]});
-										Pid -> %there is running proc for next hr
-											%gen_server:cast(Pid,{prevhpoint, lists:last(HR)})
-											lager:debug("shedule recalc for ~p ~p after proc ~p finishes ",
-													   [
-														State#state.id, 
-														(State#state.chour+1),
-														Pid
-													   ]),
-											gen_server:cast(Pid,needrecalc)
-									end
-							end;
-						_ -> false %no points appended. nothing need be recalculated
-					end
-			end,
+			NewData1= if Force == true andalso State#state.fixedhour=/=0 ->
+							 case dict:find(chlastpoint, State#state.data) of
+								 {ok, true} -> % need recalc next one
+									 lager:info("Need recalc next hr for ~p",[State#state.id]),
+									 case HR of
+										 [] ->
+											 %no data
+											 dict:store(chlastpoint, false, State#state.data);
+										 _ ->
+											 case global:whereis_name({device, State#state.id, (State#state.chour+1)}) of
+												 undefined -> % no running process for next hr, enqueue
+													 lager:debug("run recalc for ~p ~p in background",
+																 [
+																  State#state.id, 
+																  (State#state.chour+1)
+																 ]),
+													 Bin= <<(integer_to_binary(State#state.id))/binary,":",
+															(integer_to_binary((State#state.chour+1)*3600))/binary,":",
+															(integer_to_binary((State#state.chour+1)*3600))/binary,":nextrecalc">>,
+													 gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]}),
+													 dict:store(chlastpoint, false, State#state.data);
+												 Pid -> %there is running proc for next hr
+													 %gen_server:cast(Pid,{prevhpoint, lists:last(HR)})
+													 lager:debug("shedule recalc for ~p ~p after proc ~p finishes ",
+																 [
+																  State#state.id, 
+																  (State#state.chour+1),
+																  Pid
+																 ]),
+													 gen_server:cast(Pid,needrecalc),
+													 dict:store(chlastpoint, false, State#state.data)
+											 end
+									 end;
+								 _ -> 
+									 %no points appended. nothing need be recalculated
+									 State#state.data
+							 end;
+						 true -> State#state.data
+					  end,
 
 			HR1=mng:proplist2tom(HR),
 			_MngRes=mng:ins_update(mongo,<<"rawdata">>,
@@ -739,7 +742,7 @@ dump_stat(State, Force) ->
 
 			%Save hour state
 			Term=[
-				  {data,State#state.data},
+				  {data,NewData1},
 				  {plugins_data,State#state.plugins_data},
 				  {last_ptime,State#state.last_ptime}
 				 ] 
@@ -783,11 +786,9 @@ dump_stat(State, Force) ->
 
 
 			State#state{data=
-						dict:store(chlastpoint, false,
-								   dict:store(lastdump,time_compat:erlang_system_time(seconds),
-											  dict:store(mngid,IUID,
-														 State#state.data
-														)
+						dict:store(lastdump,time_compat:erlang_system_time(seconds),
+								   dict:store(mngid,IUID,
+											  NewData1
 											 )
 								  )
 					   };
@@ -829,7 +830,7 @@ recalc_ifneeded(State) ->
 	if Disorder orelse Recalc -> 
 		   Bin= <<(integer_to_binary(State#state.id))/binary,":",
 				   (integer_to_binary(State#state.chour*3600))/binary,":",
-				   (integer_to_binary(State#state.chour*3600))/binary,":">>,
+				   (integer_to_binary(State#state.chour*3600))/binary,":selfrecalc">>,
 
 		   gen_server:cast(redis_set,{cmd, ["lpush","recalc",Bin]}),
 		   true;
@@ -1777,6 +1778,39 @@ known_atoms() ->
 	 aggregators_alias
 	].
 
+fetch_last(DeviceID,Hour,MyLast) ->
+	case global:whereis_name({device, DeviceID, Hour}) of
+		undefined ->
+			lager:debug("requesting new point for ~p ~p my last ~p",[DeviceID,Hour,MyLast]),
+			try
+				{PL}=mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,DeviceID,hour,Hour}),
+				Raw=mng:m2proplist(lists:last( proplists:get_value(raw, mng:m2proplist(PL)))),
+				case proplists:get_value(dt, Raw) > MyLast of 
+					true ->
+						lager:debug("found new point for ~p ~p ~p",[DeviceID,Hour,Raw]),
+						{new, Raw };
+					false ->
+						lager:debug("not found new point for ~p ~p ~p ~p",[DeviceID,Hour,MyLast,proplists:get_value(dt, Raw)]),
+						nonew
+				end
+			catch _:_ ->
+					  error
+			end;
+		PID ->
+			case gen_server:call(PID, get_latest_point) of
+				Raw when is_list(Raw) ->
+					lager:debug("Got latest ~p directly from worker ~p",[Raw,PID]),
+					case proplists:get_value(dt, Raw) > MyLast of 
+						true ->
+							{new, Raw};
+						false ->
+							nonew
+					end;
+				_Any ->
+					error
+			end
+	end.
+
 %%% =====[ TEST ]======
 test(counter) ->
 	lists:map(fun({V1,V2,L}) ->
@@ -1810,41 +1844,30 @@ test(sorter) ->
 	Test1(),
 	Test2(),
 	Test3(),
-	ok.
+	ok;
+
+test(complex) ->
+	Dict=dict:store(timeout,5, dict:new()),
+	TXTSetting="{ \"inputs\":[ { \"in\":\"in0\", \"type\":\"gauge\", \"factor\":1, \"variable\":\"voltage\" }, { \"in\":\"in1\", \"type\":\"gauge\", \"factor\":1, \"variable\":\"battery\" }, { \"in\":\"in4\", \"type\":\"counter\", \"factor\":0.01, \"variable\":\"tfuel\", \"ovfval\":65536 }, { \"in\":\"in5\", \"type\":\"counter\", \"factor\":-0.01, \"variable\":\"tfuel\", \"ovfval\":65536 } ] } ",
+	Settings=decode_settings(TXTSetting),
+
+	State=#state{last_ptime=0,
+				 history_raw=[],
+				 history_processed=[],
+				 history_events=gb_trees:empty(),
+				 chour=1000,
+				 id=100500,
+				 org_id=1,
+				 fixedhour=0,
+				 kind=undefined,
+				 settings=Settings,
+				 sub_ev=[],
+				 data=Dict,
+				 current_values=dict:new(),
+				 plugins_data=#{},
+				 usersub=[]
+				},
+	{ok, State}.
 
 
-fetch_last(DeviceID,Hour,MyLast) ->
-	case global:whereis_name({device, DeviceID, Hour}) of
-		undefined ->
-			lager:debug("requesting new point for ~p ~p my last ~p",[DeviceID,Hour,MyLast]),
-			try
-				{PL}=mng:find_one(mongo,<<"rawdata">>,{type,rawdata,device,DeviceID,hour,Hour}),
-				Raw=mng:m2proplist(lists:last( proplists:get_value(raw, mng:m2proplist(PL)))),
-				case proplists:get_value(dt, Raw) > MyLast of 
-					true ->
-						lager:debug("found new point for ~p ~p ~p",[DeviceID,Hour,Raw]),
-						%{PLD}=mng:find_one(mongo,<<"devicedata">>,{type,devicedata,device,DeviceID,hour,Hour}),
-						%DD=mng:m2proplist(lists:last( proplists:get_value(data, mng:m2proplist(PLD)))),
-						{new, Raw };
-					false ->
-						lager:debug("not found new point for ~p ~p ~p ~p",[DeviceID,Hour,MyLast,proplists:get_value(dt, Raw)]),
-						nonew
-				end
-			catch _:_ ->
-					  error
-			end;
-		PID ->
-			case gen_server:call(PID, get_latest_point) of
-				Raw when is_list(Raw) ->
-					lager:debug("Got latest ~p directly from worker ~p",[Raw,PID]),
-					case proplists:get_value(dt, Raw) > MyLast of 
-						true ->
-							{new, Raw};
-						false ->
-							nonew
-					end;
-				_Any ->
-					error
-			end
-	end.
 
