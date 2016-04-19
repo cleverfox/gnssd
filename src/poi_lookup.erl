@@ -30,7 +30,7 @@ get_member() ->
 							  [{message_queue_len, QLen}] = erlang:process_info(Pid, [message_queue_len]),
 							  {Pid, QLen}
 					  end,
-					  pg2:get_members(?MODULE)),
+					  pg2:get_local_members(?MODULE)),
 	case lists:keysort(2, Members) of
 		[{Pid, _} | _] -> {ok,Pid};
 		[] -> {error, nomembers}
