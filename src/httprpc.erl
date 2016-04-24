@@ -26,6 +26,7 @@ init([]) ->
 											 {"/", httprpc_index, []},
 											 {"/bapi/near", httprpc_near, []},
 											 {"/bapi/path/:device/current", httprpc_curpath, []},
+											 {"/bapi/fuelhint/:device/:hour", httprpc_fuelhint, []},
 											 {"/api/path/:device/current", httprpc_curpath, []},
 											 {"/bapi/test/:device/:t1/:t2", httprpc_notfound, []}
 											] ++ 
