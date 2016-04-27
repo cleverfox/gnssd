@@ -1,6 +1,6 @@
 -module(ee).
 -include("include/usersub.hrl").
--export([emit_event/6]).
+-export([emit_event/6,emit_json/5]).
  
 %-callback emit(Sub :: record(usersub), HState :: map(), Current :: list(term())) -> 'ok'|tuple('error', Reason :: string()).
 -callback emit(Sub :: tuple(), HState :: map(), Current :: list(term()), Prev :: term) -> 'ok'|tuple().
@@ -18,13 +18,6 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 	Name=Sub#usersub.ev_name,
 
 	lager:info("Car ~p event ~p(~p, ~p)",[CarID, Name, Event, ExtraData]),
-	UserIDb=integer_to_binary(Sub#usersub.user_id),
-	UserSev=integer_to_binary(Sub#usersub.severity),
-	DevH= <<"user:",UserIDb/binary,":events:",UserSev/binary,":events">>,
-	DevL= <<"user:",UserIDb/binary,":events:",UserSev/binary,":lastt">>,
-	lager:info("Car ~p event ~p",[CarID, DevH]),
-	KeepNum=50,
-
 	JSData=iolist_to_binary(mochijson2:encode(
 		   [
 			{evid,Sub#usersub.evid},
@@ -32,13 +25,30 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 			{type,event},
 			{dev,CarID},
 			{t,T},
-			{severity,UserSev},
+			{severity,Sub#usersub.severity},
 			{event_action,Event}
 		   ] ++ ExtraData)),
-	lager:info("**** JSD ~p ~p",[DevH,JSData]),
+	lager:info("**** JSD ~p ~p",[Sub#usersub.user_id,JSData]),
+
+	emit_json(T, JSData, Sub#usersub.user_id, Sub#usersub.severity, Sub#usersub.user_chan),
+	
+
+	ok.
+
+emit_json(T, JSON, UserID, UserSev, UChan) ->
+	UserIDb=if is_binary(UserID) -> UserID;
+			   is_integer(UserID) -> integer_to_binary(UserID)
+			end,
+	UserSevb=if is_binary(UserSev) -> UserSev;
+			   is_integer(UserSev) -> integer_to_binary(UserSev)
+			end,
+	DevH= <<"user:",UserIDb/binary,":events:",UserSevb/binary,":events">>,
+	DevL= <<"user:",UserIDb/binary,":events:",UserSevb/binary,":lastt">>,
+	KeepNum=50,
+
 	RedA=fun(W) -> 
 				 N=case eredis:q(W, 
-								 [ "rpush", DevH, JSData ]) of
+								 [ "rpush", DevH, JSON ]) of
 					   {ok, Num} when is_binary(Num) -> 
 						   binary_to_integer(Num);
 					   _ -> KeepNum+1
@@ -51,10 +61,6 @@ emit_event(CarID, Sub, T, _Name, Event, ExtraData) ->
 				 eredis:q(W, [ "set", DevL, T ])
 		 end,
 	poolboy:transaction(redis,RedA),
-	UChan=Sub#usersub.user_chan,
-	lager:info("Send notify ~p ~p",[UChan,JSData]),
-	gen_server:cast(redis2nginx,{push,<<"push:u.",UChan/binary>>,JSData}),
-
+	lager:info("Send notify ~p ~p",[UChan,JSON]),
+	gen_server:cast(redis2nginx,{push,<<"push:u.",UChan/binary>>,JSON}),
 	ok.
-
-
