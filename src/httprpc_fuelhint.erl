@@ -48,11 +48,16 @@ init(Req, State) ->
 							 {error, _Reason} -> <<"">>
 						 end,
 				 lager:info("Request ~p",[Request]),
-				 
+				 NewEvents=[mng:proplisttom(R) || R<-Request],
+				 lager:info("Request ~p",[NewEvents]),
 				 ResID=mng:ins_update(mongo,
 								<<"hints">>,
 								{device,Dev,hour,Hour,type,hints},
-								{hints,{fuel,Request}}),
+								{hints,{fuel, NewEvents }}),
+				 mng:ins_update(mongo,
+								<<"devicedata">>,
+								{device,Dev,hour,Hour,type,devicedata},
+								{'aggregated.agg_fuelgauge.events', NewEvents }),
 				 <<(jsx:encode(#{
 					  req=>Request,
 					  hint1=>hint2list(HintID),
