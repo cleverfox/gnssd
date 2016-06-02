@@ -74,7 +74,7 @@ get_init_hdata(ID,CHour,Fixed) ->
 				   _ -> none
 			   end
 	   end,
-	case poolboy:transaction(redis,RF) of
+	Result=case poolboy:transaction(redis,RF) of
 		none -> [];
 		Bin when is_binary(Bin) ->
 			try 
@@ -91,7 +91,8 @@ get_init_hdata(ID,CHour,Fixed) ->
 							  []
 					end
 			end
-	end. 
+	end,
+	Result. 
 
 
 init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
@@ -106,7 +107,12 @@ init1(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 				 UH when is_integer(UH) -> 
 					 UH
 			 end,
-	PrevHourData=get_init_hdata(ID,UnixHour-1, Recalc =/= false ),
+	PrevHourData0=get_init_hdata(ID,UnixHour-1, Recalc =/= false ),
+	PrevHourData=case proplists:get_value(last_ptime,PrevHourData0,undefined) of
+					 XTime when (UnixHour*3600)>=XTime ->
+						 PrevHourData0;
+					 _ -> []
+				 end,
 	
 	HistoryProcessed=preprocess_ddata(ID,UnixHour,Recalc,proplists:get_value(last_processed,PrevHourData,none)),
 	Dict=proplists:get_value(data,PrevHourData,dict:new()),
@@ -279,27 +285,25 @@ preprocess_rawdata(ID,IMEI,UnixHour,Recalc,Dict) ->
 			  end,
 			Points=[ mng:m2proplist(X) || X<-List ],
 			{MinTime,MaxTime}= lists:foldl(F, {undefined,0}, Points ),
-			%lager:error("min ~p",[MinTime]),
+			History=[ {proplists:get_value(dt,X),X} || X<-Points ],
+
 			StartHour=UnixHour*3600,
 			EndHour=(UnixHour+1)*3600,
-			History=[ {proplists:get_value(dt,X),X} || X<-Points ],
 			NewHistory=if Recalc =/= false -> %recalc or sync
 							 PreLast=fetch_last(ID,UnixHour-1,MinTime),
+							 FilterFun=fun({Time,_Data}) ->
+											   Time >= StartHour andalso EndHour > Time
+									   end,
 							 case PreLast of
 								 {new, NewPoint} ->
-									 %lager:info("FL ~p",[PreLast]),
-									 FilterFun=fun({Time,_Data}) ->
-													   %if Time >= StartHour andalso EndHour > Time -> ok
-													   %true -> lager:info("Drop point ~p",[_Data])
-													   %end,
-													   Time >= StartHour andalso EndHour > Time
-											   end,
 									 FPoints=lists:filter(FilterFun,History),
-									 %lager:info("Add point ~p",[NewPoint]),
-									 %lists:keysort(1,[{proplists:get_value(dt,NewPoint),NewPoint}| FPoints]);
 									 [{proplists:get_value(dt,NewPoint),NewPoint}| FPoints];
 								 _ ->
-									 History
+									 PrevPoint=find_prev_point(History, StartHour, undefined),
+									 case PrevPoint of
+										 {_,_} -> [PrevPoint|lists:filter(FilterFun,History)];
+										 _ -> lists:filter(FilterFun,History)
+									 end
 							 end;
 						 true ->  %no recalc
 							  History
@@ -445,7 +449,7 @@ handle_cast({sub, SType}, State) ->
 		 end,
 %	{ok,PSub}=esub2:device_get_sub(position,State#state.id),
 	{ok,Sub}=esub2:device_get_sub(Type,State#state.id),
-	lager:error("SUB update ~p: ~p",[SType,Sub]),
+	lager:debug("SUB update ~p: ~p",[SType,Sub]),
 	lager:debug("Worker ~p got notification ~p",[State#state.id,Type]),
 	SubEV=State#state.sub_ev,
 	{ESub,Found}=lists:mapfoldl(fun({K,V}, F)-> 
@@ -886,6 +890,12 @@ process_ds(List0,State,Recalc) ->
 	{_,Dir}=proplists:lookup(dir,List),
 	{_,T}=proplists:lookup(dt,List),
 	{_,AT}=proplists:lookup(at,List),
+	Valid=case proplists:get_value(valid,List,1) of
+			  0 -> false;
+			  "0" -> false;
+			  <<"0">> -> false;
+			  _ -> true
+		  end,
 	{_,Speed}=proplists:lookup(sp,List),
 %	case  State#state.id < 10 of 
 %		true -> 
@@ -964,90 +974,95 @@ process_ds(List0,State,Recalc) ->
 %				   lager:error("Cf ~p",[InCfg]);
 %			   true -> ok
 %			end,
-			{SVals,Errors}=process_variables(List, InCfg, PRawVal, DeltaT),
-			if is_list(Errors) andalso length(Errors)>0 ->
-				   SaveDB=fun({Src,Dst,Err,Val}) ->
-								  SrcL=if is_atom(Src) -> atom_to_list(Src);
-										  is_binary(Src) -> binary_to_list(Src);
-										  is_list(Src) -> Src;
-										  true -> "Unknown"
-									   end,
-								  DstL=if is_atom(Dst) -> atom_to_list(Dst);
-										  is_binary(Dst) -> binary_to_list(Dst);
-										  is_list(Dst) -> Dst;
-										  true -> "Unknown"
-									   end,
-								  ErrL=if is_atom(Err) -> atom_to_list(Err);
-										  is_binary(Err) -> binary_to_list(Err);
-										  is_list(Err) -> Err;
-										  true -> "Unknown"
-									   end,
-								  try
-									  {ok,_HDR,ErrRow}=psql:equery("select * from device_error where device_id=$1 and error_type=$2 limit 1",
-															   [State#state.id,SrcL++":"++DstL++":"++ErrL]),
-									  if ErrRow == [] ->
-											 psql:equery("insert into device_error (device_id,error_type,first_detected,first_data) values ($1,$2,now(),$3)",
-														 [
-														  State#state.id,
-														  SrcL++":"++DstL++":"++ErrL,
-														  iolist_to_binary(mochijson2:encode(
-																			 [
-																			  {type,Err},
-																			  {device,State#state.id},
-																			  {ds,Src},
-																			  {var,Dst},
-																			  {val,Val}
-																			 ]))
-														 ]),
-											 ok;
-										 true ->
-											 ok
-									  end,
-									  lager:debug("Device ~p DS error ~p ~p ~p",
-												  [State#state.id,SrcL++":"++DstL++":"++ErrL,Val,ErrRow])
+			SVals = if Valid ->
+						   {SVals0,Errors}=process_variables(List, InCfg, PRawVal, DeltaT),
+						   if is_list(Errors) andalso length(Errors)>0 ->
+								  SaveDB=fun({Src,Dst,Err,Val}) ->
+												 SrcL=if is_atom(Src) -> atom_to_list(Src);
+														 is_binary(Src) -> binary_to_list(Src);
+														 is_list(Src) -> Src;
+														 true -> "Unknown"
+													  end,
+												 DstL=if is_atom(Dst) -> atom_to_list(Dst);
+														 is_binary(Dst) -> binary_to_list(Dst);
+														 is_list(Dst) -> Dst;
+														 true -> "Unknown"
+													  end,
+												 ErrL=if is_atom(Err) -> atom_to_list(Err);
+														 is_binary(Err) -> binary_to_list(Err);
+														 is_list(Err) -> Err;
+														 true -> "Unknown"
+													  end,
+												 try
+													 {ok,_HDR,ErrRow}=psql:equery("select * from device_error where device_id=$1 and error_type=$2 limit 1",
+																				  [State#state.id,SrcL++":"++DstL++":"++ErrL]),
+													 if ErrRow == [] ->
+															psql:equery("insert into device_error (device_id,error_type,first_detected,first_data) values ($1,$2,now(),$3)",
+																		[
+																		 State#state.id,
+																		 SrcL++":"++DstL++":"++ErrL,
+																		 iolist_to_binary(mochijson2:encode(
+																							[
+																							 {type,Err},
+																							 {device,State#state.id},
+																							 {ds,Src},
+																							 {var,Dst},
+																							 {val,Val}
+																							]))
+																		]),
+															ok;
+														true ->
+															ok
+													 end,
+													 lager:debug("Device ~p DS error ~p ~p ~p",
+																 [State#state.id,SrcL++":"++DstL++":"++ErrL,Val,ErrRow])
 
-								  catch Ec:Ee -> 
-											lager:error("Error ~p:~p",[Ec,Ee]),
-											ok
-								  end
-						  end,
-				   lists:foreach(SaveDB, Errors);
-			   true -> ok
-			end,
-%			if State#state.id==1 ->
-%				   lager:error("DSr ~p",[PRawVal]),
-%				   lager:error("DS ~p",[SVals]);
-%			   true -> ok
-%			end,
+												 catch Ec:Ee -> 
+														   lager:error("Error ~p:~p",[Ec,Ee]),
+														   ok
+												 end
+										 end,
+								  lists:foreach(SaveDB, Errors);
+							  true -> ok
+						   end,
+						   SVals0;
+					   true -> %invalid 
+						   []
+					end,
 
 
-			SoftVars=case dict:find(lastpos,State#state.data) of % Software Odometer
-						 {ok, [0,0]} -> []; %skip if prev coords invalid;
-						 {ok, [PLon,PLat]} ->
-							 if Lon == 0 andalso Lat == 0 ->
-									[];
-								true ->
-									{Azimut,Distance}=gpstools:sphere_inverse({PLon,PLat},{Lon,Lat}),
-									[
-									 {softodometer,Distance*1000},
-									 {softcompass,Azimut}
-									]
-							 end;
-						 _ -> []
+			SoftVars=if Valid ->
+							case dict:find(lastpos,State#state.data) of % Software Odometer
+								{ok, [0,0]} -> []; %skip if prev coords invalid;
+								{ok, [PLon,PLat]} ->
+									if Lon == 0 andalso Lat == 0 ->
+										   [];
+									   true ->
+										   {Azimut,Distance}=gpstools:sphere_inverse({PLon,PLat},{Lon,Lat}),
+										   [
+											{softodometer,Distance*1000},
+											{softcompass,Azimut}
+										   ]
+									end;
+								_ -> []
+							end;
+						true -> %invalid
+							[]
 					 end,
 
 			PrData=[{dt,T},
 					{position,[Lon, Lat]},
 					{dir, Dir},
 					{delay, AT-T},
+					{valid, Valid},
 					{sp,Speed}] ++ SVals ++ SoftVars,
 			%lager:info("vals ~p~n~p -> ~n~p",[DeltaT,PrevAval,PrData]),
 
 			lager:debug("Car ~p src ~p",[State#state.id,List]),
 			lager:debug("Car ~p agg ~p",[State#state.id,PrData]),
 
-			NewState=case T > State#state.last_ptime of
-						 true -> %this is a fresh point, process it imeediate
+			NewState=case {Valid, T > State#state.last_ptime} of
+						 {true, true} -> %this is a fresh point, process it imeediate
 							 UserPIlst=lists:usort([
 													{ S#usersub.pi_name, S#usersub.params } || 
 													S <- State#state.usersub,
@@ -1203,7 +1218,8 @@ process_ds(List0,State,Recalc) ->
 													)
 										 )
 							  };
-						 _ -> %disordered point, process late
+
+						 {true, false} -> %disordered point, process late
 							 lager:debug("Disordered packet ~p",[PrData]),
 							 State#state{
 							   history_raw=PHist, % lists:sort(fun({A,_,_},{B,_,_})-> B>A end,PHist ++ [{T,now(),List}]),
@@ -1213,7 +1229,19 @@ process_ds(List0,State,Recalc) ->
 															 end,PrHist ++ [{T,PrData}]
 												   ), 
 							   data= dict:store(disorder, true, State#state.data), 
-							   chour=UnixHour}
+							   chour=UnixHour};
+						 {false, _} -> %non valid point
+							 lager:debug("Disordered packet ~p",[PrData]),
+							 State#state{
+							   history_raw=PHist,
+							   history_processed=lists:sort(fun 
+																({A,_},{B,_})-> B>A;
+																 ({A,_,_},{B,_,_})-> B>A 
+															end,
+															PrHist ++ [{T,PrData}]
+														   ), 
+							   chour=UnixHour
+							  }
 					 end,
 	dump_stat(NewState)
 	end
@@ -1810,6 +1838,16 @@ fetch_last(DeviceID,Hour,MyLast) ->
 					error
 			end
 	end.
+
+find_prev_point([],_SOH,LastFound) ->
+	LastFound;
+
+find_prev_point([{UT,_CP}|_Rest],SOH,LastFound) when UT >= SOH ->
+	LastFound;
+
+find_prev_point([{UT,CP}|Rest],SOH,_LastFound) ->
+	find_prev_point(Rest,SOH,{UT,CP}).
+
 
 %%% =====[ TEST ]======
 test(counter) ->
