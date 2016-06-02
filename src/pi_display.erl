@@ -6,30 +6,47 @@ separate() -> 0.
 ds_process(PI_Data, Current, Hist, HState) ->  %{private permanent data, public temporary data proplist}
 	ds_process(PI_Data, Current, Hist, HState, []).
 	
-ds_process(PI_Data, Current, Hist, HState, PI_Args) ->  %{private permanent data, public temporary data proplist}
-	{_,T}=proplists:lookup(dt,Current),
-	%{MSec,Sec,_} = now(),
-	%NowH=gpstools:floor((MSec*1000000 + Sec)/3600),
-	%UnixHour=gpstools:floor(T/3600),
-	%NeedNotify=(
-	%  (UnixHour == NowH orelse UnixHour == NowH-1) 
-	%  andalso (T > PI_Data)
-	% ),
+ds_process(PI_Data0, Current, _Hist, HState, PI_Args) ->  %{private permanent data, public temporary data proplist}
+	PI_Data=if(is_map(PI_Data0)) -> PI_Data0;
+			  true -> #{}
+			end,
 
-	case PI_Data of
-		LT when is_integer(LT) ->
-			if T > LT ->
-				   ds_process_real(PI_Data, Current, Hist, HState, PI_Args);
-			   true ->
-				   {PI_Data,[]}
-			end;
-		_ ->
-			ds_process_real(0, Current, Hist, HState, PI_Args)
+	Bi=integer_to_binary(maps:get(id,HState)),
+
+	RedisTime=case maps:get(last_rt,PI_Data,undefined) of
+				  undefined -> 
+					  case poolboy:transaction(redis,fun(W) -> eredis:q(W,["hget",<<"device:lastpos:",Bi/binary>>,"t"]) end) of
+						  {ok, BinTime} when is_binary(BinTime) ->
+							  binary_to_integer(BinTime);
+						  _ -> 0
+					  end;
+				  PreTimestamp ->
+					  PreTimestamp
+			  end,
+
+	T=proplists:get_value(dt,Current),
+	%lager:info("Display ~p ~p ~p",[RedisTime,T,T>RedisTime]),
+
+	if T > RedisTime ->
+		   ds_display(T, Bi, Current, HState, PI_Args),
+
+		   HourBegin=trunc(time_compat:os_system_time(seconds)/3600)*3600,
+		   {PI_Data#{
+			  last_t => if T >= HourBegin ->
+							   T; %this is fresh data
+						   true ->
+							   undefined %old data, check redis every time
+						end,
+			  last_rt => T
+			 },[]};
+	   true ->
+		   {PI_Data#{ 
+			  last_rt => RedisTime 
+			 },[]}
 	end.
 
-ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permanent data, public temporary data proplist}
+ds_display(T, Bi, Current, HState, PI_Args) ->
 	{_,[Lon, Lat]}=proplists:lookup(position, Current),
-	T=proplists:get_value(dt,Current),
 	{_,Speed}=proplists:lookup(sp,Current),
 	{_,Dir}=proplists:lookup(dir,Current),
 
@@ -56,7 +73,6 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 	%lager:info("C ~p",[Sensors]),
 	STOP=maps:get(pi_stop,HState,[]),
 	POIs=proplists:get_value(current_poi,maps:get(pi_poi,HState,[]),[]),
-	Bi=integer_to_binary(maps:get(id,HState)),
 	DevH= <<"device:lastpos:",Bi/binary>>,
 	DevP= <<"device:cpoi:",Bi/binary>>,
 	Cmd=[
@@ -81,12 +97,6 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 		_ ->
 			[[ "sadd", DevP ] ++ POIs]
 	end,
-%	case maps:get(id,HState) < 10 of 
-%		true -> 
-%			lager:error("T ~p",[T]),
-%			lager:error("cmd ~p",[Cmd]);
-%		false-> ok
-%	end,
 
 	gen_server:cast(redis_set,{mcmd, Cmd }),	
 	
@@ -129,9 +139,8 @@ ds_process_real(_PI_Data, Current, _Hist, HState, PI_Args) ->  %{private permane
 				{pos,[Lon, Lat]}
 			   ],
 	%lager:error("JS: ~p",[DetailData]),
-	notifyDetails(PI_Args,DetailData,Current,HState),
+	notifyDetails(PI_Args,DetailData,Current,HState).
 
-	{T,[]}.
 
 
 f2b(X) when is_integer(X) ->
