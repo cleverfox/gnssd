@@ -375,10 +375,18 @@ handle_call(get_state, _From, State) ->
 	{reply, State, State};
 
 handle_call(get_path, _From, State) ->
-	Res=lists:map(fun({DT,List}) ->
-						  [DT,proplists:get_value(position,List)]
-				  end, State#state.history_processed),
-	{reply, Res, State};
+	try
+		T1=State#state.chour*3600,
+		T2=(State#state.chour+1)*3600,
+		Res=lists:filtermap(fun({DT,List}) when DT>=T1 andalso DT<T2 ->
+									{true,[DT,proplists:get_value(position,List)]};
+							   (_) ->
+									false
+					  end, State#state.history_processed),
+		{reply, Res, State}
+	catch Ec:Ee ->
+			  {reply, {error, Ec, Ee}, State}
+	end;
 
 handle_call(get_latest_point, _From, State) ->
 	Res=try
