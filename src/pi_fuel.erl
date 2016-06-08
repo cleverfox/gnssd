@@ -23,7 +23,7 @@ ds_process(PI_Data0, _Current, _Hist, HState, _PI_Params) ->
 	if 
 		UnixTime > PI_Data#pi_fuel_r.nextproc ->
 			lager:debug("PIPP ~p ~p",[CarID, PI_Data]),
-			case dict:find(mngid,maps:get(data,HState,dict:new())) of
+			case maps:get(mngid,maps:get(data,HState,#{})) of
 				{ok, MID} ->
 					HID=list_to_binary(mng:id2hex(MID)),
 					gen_server:cast(redis_set,{mcmd, 
