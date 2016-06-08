@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/1, start_link/2, start_link/3, test/1, tar/2, known_atoms/0, get_init_hourstate/3, prepare_tartab/1 ]).
+-export([start_link/1, start_link/2, start_link/3, test/1, tar/2, known_atoms/0, get_init_hourstate/3, prepare_tartab/1, syncrecalc/1 ]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -339,7 +339,7 @@ get_init_hourstate(ID,CHour,Fixed) ->
 				   _ -> none
 			   end
 	   end,
-	Result=case poolboy:transaction(redis,RF) of
+	case poolboy:transaction(redis,RF) of
 		none -> [];
 		Bin when is_binary(Bin) ->
 			try 
@@ -356,28 +356,35 @@ get_init_hourstate(ID,CHour,Fixed) ->
 							  []
 					end
 			end
-	end,
-	Result. 
+	end.
 
 
 init_device(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
-	ESub=esub2:device_get_sub(ID),
-	Subs=get_event_subs(ID),
+	ESub=case Recalc of  
+			 false -> esub2:device_get_sub(ID);
+			 _ -> [] %do not load subs on reload
+		 end,
+	Subs=case Recalc of 
+			 false -> get_event_subs(ID);
+			 _ -> [] %do not load subs on reload
+		 end,
 
 	UnixHour=case Hour of 
-				 0 -> 
+				 0 -> %current hour
 					 trunc(time_compat:erlang_system_time(seconds)/3600);
-				 UH when is_integer(UH) -> 
+				 UH when is_integer(UH) -> %old hour
 					 UH
 			 end,
-	PrevHourData0=get_init_hourstate(ID,UnixHour-1, Recalc =/= false ),
+	PrevHourData0=get_init_hourstate(ID,UnixHour-1, Recalc =/= false),
 	PrevHourData=case proplists:get_value(last_ptime,PrevHourData0,undefined) of
 					 XTime when (UnixHour*3600)>=XTime ->
 						 PrevHourData0;
 					 _ -> []
 				 end,
 	
-	HistoryProcessed=preprocess_devicedata(ID,UnixHour,Recalc,proplists:get_value(last_processed,PrevHourData,none)),
+	HistoryProcessed=preprocess_devicedata(ID,UnixHour,Recalc,
+										   proplists:get_value(last_processed,PrevHourData,none)
+										  ),
 	Dict=case proplists:get_value(data,PrevHourData,#{}) of
 			 HM when is_map(HM) -> HM;
 			 _ -> #{}
@@ -459,20 +466,46 @@ init_device(ID,Kind,OID,Settings,Hour,Recalc, IMEI) ->
 				 usersub=Subs
 				},
 	if Recalc == sync ->
-		   lager:info("sync dev ~p hour ~p cnt ~p",[ID,CHour,length(State#state.history_raw)]),
-		   S1=lists:foldl(fun({Ut,X},St) ->
-								  case trunc(Ut/3600)<State#state.chour of
-									  true -> 
-										  St;
-									  _ -> 
-										  process_ds(X,St, true)
-								  end
-						  end, State, State#state.history_raw),
+		   S1=syncrecalc(State,true),
 		   dump_stat(S1,eoh),
 		   done;
 	   true -> 
 		   {ok, State}
 	end.
+
+syncrecalc(State) ->
+	syncrecalc(State,false).
+
+syncrecalc(State, Prepared) ->
+	lager:info("sync dev ~p hour ~p cnt ~p",[State#state.id,
+											 State#state.chour,
+											 length(State#state.history_raw)
+											]),
+	NewRaw = case Prepared of
+				 true -> State#state.history_raw;
+				 false ->
+					 SortedRaw=lists:keysort(1,State#state.history_raw),
+					 MinTime=case SortedRaw of
+								 [{T1,_}|_] -> T1;
+								 _ -> undefined
+							 end,
+					 prepare_raw4recalc(SortedRaw,State#state.id,State#state.chour,MinTime)
+			 end,
+	lists:foldl(fun({Ut,X},St) ->
+						case trunc(Ut/3600)<State#state.chour of
+							true -> 
+								St;
+							_ -> 
+								process_ds(X,St, true)
+						end
+				end, State#state{
+					   history_raw=NewRaw,
+					   history_processed=[],
+					   data=maps:put(recalc, false,
+									 maps:put(disorder, false, State#state.data)
+									)
+					  }, NewRaw).
+
 
 preprocess_devicedata(ID,UnixHour,Recalc,LP) ->
 	PLPDs=if Recalc==false -> 
@@ -529,53 +562,57 @@ preprocess_rawdata(ID,IMEI,UnixHour,Recalc,Dict) ->
 	%lager:info("ID ~p",[mng:id2hex(proplists:get_value('_id',SourceRawData))]),
 	case proplists:get_value(raw,SourceRawData) of 
 		List when is_list(List) ->
-			F=fun(Point,{Imin,Imax})-> 
-					  case proplists:get_value(dt,Point) of 
-						  V when is_integer(V) -> 
-							  {
-							   case Imin of 
-								   undefined -> V;
-								   _ when Imin > V -> V;
-								   _ -> Imin 
-							   end,
-							   case Imax of 
-								   undefined -> V;
-								   _ when Imax < V -> V;
-								   _ -> Imax 
-							   end 
-							  };
-						  _ -> {Imin, Imax} 
-					  end
-			  end,
 			Points=[ mng:m2proplist(X) || X<-List ],
-			{MinTime,MaxTime}= lists:foldl(F, {undefined,0}, Points ),
+			{MinTime,MaxTime}= lists:foldl( fun(Point,{Imin,Imax})-> 
+
+													case proplists:get_value(dt,Point) of 
+														V when is_integer(V) -> 
+															{
+															 case Imin of 
+																 undefined -> V;
+																 _ when Imin > V -> V;
+																 _ -> Imin 
+															 end,
+															 case Imax of 
+																 undefined -> V;
+																 _ when Imax < V -> V;
+																 _ -> Imax 
+															 end 
+															};
+														_ -> {Imin, Imax} 
+													end
+											end, {undefined,0}, Points ),
 			History=[ {proplists:get_value(dt,X),X} || X<-Points ],
 
-			StartHour=UnixHour*3600,
-			EndHour=(UnixHour+1)*3600,
 			NewHistory=if Recalc =/= false -> %recalc or sync
-							 PreLast=fetch_last(ID,UnixHour-1,MinTime),
-							 FilterFun=fun({Time,_Data}) ->
-											   Time >= StartHour andalso EndHour > Time
-									   end,
-							 case PreLast of
-								 {new, NewPoint} ->
-									 FPoints=lists:filter(FilterFun,History),
-									 [{proplists:get_value(dt,NewPoint),NewPoint}| FPoints];
-								 _ ->
-									 PrevPoint=find_prev_point(History, StartHour, undefined),
-									 case PrevPoint of
-										 {_,_} -> [PrevPoint|lists:filter(FilterFun,History)];
-										 _ -> lists:filter(FilterFun,History)
-									 end
-							 end;
-						 true ->  %no recalc
+							  prepare_raw4recalc(History,ID,UnixHour,MinTime);
+						  true ->  %no recalc
 							  History
 					  end,		
 			D1=maps:put(lastdump,time_compat:erlang_system_time(seconds),Dict),
 			{MaxTime, NewHistory, UnixHour, D1};
 		undefined -> 
 			{0, [], 0, Dict}
+	end.
+
+prepare_raw4recalc(History,ID,UnixHour,MinTime) ->
+	StartHour=UnixHour*3600,
+	EndHour=(UnixHour+1)*3600,
+
+	PreLast=fetch_last(ID,UnixHour-1,MinTime),
+	FilterFun=fun({Time,_Data}) ->
+					  Time >= StartHour andalso EndHour > Time
+			  end,
+	case PreLast of
+		{new, NewPoint} ->
+			FPoints=lists:filter(FilterFun,History),
+			[{proplists:get_value(dt,NewPoint),NewPoint}| FPoints];
+		_ ->
+			PrevPoint=find_prev_point(History, StartHour, undefined),
+			case PrevPoint of
+				{_,_} -> [PrevPoint|lists:filter(FilterFun,History)];
+				_ -> lists:filter(FilterFun,History)
+			end
 	end.
 
 b2i(X) when is_binary(X) ->
@@ -591,11 +628,25 @@ b2a(X) when is_binary(X) ->
 dump_stat(State) ->
 	dump_stat(State, false).
 
-dump_stat(State, Force) ->
+dump_stat(State0, Force) ->
+	Disorder=maps:get(disorder, State0#state.data, false),
+	Recalc=maps:get(recalc, State0#state.data, false),
+	State=if Disorder orelse Recalc ->
+				 syncrecalc(State0,false);
+			 true ->
+				 State0
+		  end,
 	LastDump=maps:get(lastdump,State#state.data,0),
 	LastSec=time_compat:erlang_system_time(seconds)-LastDump,
 	case (Force =/= false) orelse (LastSec > 300) of 
 		true ->
+			Dev=State#state.id,
+			Filename= <<"dump.",
+						(integer_to_binary(Dev))/binary,
+						".",
+						(integer_to_binary(time_compat:os_system_time(seconds)))/binary,
+						".bin">>,
+			file:write_file(Filename,erlang:term_to_binary(State)),
 			%lager:info("Device ~p dumping to mongodb....",[State#state.id]),
 			Disorder=maps:get(disorder, State#state.data, false),
 			HR=case State#state.history_raw of
@@ -868,9 +919,6 @@ add_raw_item([], Item) -> %{NewArray, PrevItem}
 add_raw_item(Left, Item) -> 
 	Li=lists:last(Left),
 	{Left++[Item],Li}.
-
-process_ds(List,State) ->
-	process_ds(List,State,false).
 
 process_ds(List0,State,Recalc) ->
 	try 
@@ -1284,10 +1332,10 @@ ds(List0, State, TTL) ->
 						lager:debug("Invalid data from car ~p: ~p",[State#state.id, List]),
 						State;
 					CurH -> %current hour
-						process_ds(List,State);
+						process_ds(List,State,false);
 					NextH -> %next hour
 						S1=switch_hour(State),
-						process_ds(List,S1);
+						process_ds(List,S1,false);
 					_Any when _Any > NextUnixHour -> %data from future: incorrect time from device. ignore it.
 						PN={trunc(T/1000000),T rem 1000000,0},
 						PLT=calendar:now_to_local_time(PN),
@@ -1309,13 +1357,13 @@ ds(List0, State, TTL) ->
 						State;
 					Hour when Hour>CurH -> %it is time to switch hour, but looks like time jump at device
 						S1=switch_hour(State),
-						process_ds(List,S1)
+						process_ds(List,S1,false)
 				end;
 
 			FH when is_integer(FH) -> 
 				case UnixHour of
 					FH ->
-						process_ds(List,State);
+						process_ds(List,State,false);
 					_ -> 
 						lager:error("It is not my ds (my fixed hour ~p:~p, but ~p come)",[State#state.id,FH,UnixHour])
 				end
