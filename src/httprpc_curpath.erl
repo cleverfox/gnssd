@@ -7,20 +7,25 @@
 ]).
 
 init(Req, State) ->
-	lager:info("Curpath"),
 	Dev=binary_to_integer(cowboy_req:binding(device,Req)),
+	lager:info("Curpath ~p",[Dev]),
 	{P,R,B,E}=case catch whereis(list_to_existing_atom("device_"++integer_to_list(Dev))) of
 				  Pid when is_pid(Pid) ->
 					  Points0=gen_server:call(Pid,get_path),
 					  CH=time_compat:erlang_system_time(seconds) div 3600,
 					  T1=CH*3600,
 					  T2=(CH+1)*3600,
-					  Points=lists:filter(fun({DT,_}) when DT>=T1 andalso DT<T2 -> true;
+					  Points=lists:filter(fun([DT,_]) when DT>=T1 andalso DT<T2 -> true;
 									  (_) -> false
-								   end, Points0),
-					  [P1,_]=hd(Points),
-					  [P2,_]=lists:last(Points),
-					  {Points,ok,P1,P2};
+										  end, Points0),
+					  case Points of
+						  [] ->
+							  {[],ok,0,0};
+						  [_|_] ->
+							  [P1,_]=hd(Points),
+							  [P2,_]=lists:last(Points),
+							  {Points,ok,P1,P2}
+					  end;
 				  _ -> 
 					  {[],noproc,0,0}
 			  end,
