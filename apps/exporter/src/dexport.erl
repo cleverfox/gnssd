@@ -20,7 +20,8 @@
 		  amqp_chan
 		 }).
 
--include("deps/rabbitmq-erlang-client/include/amqp_client.hrl").
+%-include("deps/rabbitmq-erlang-client/include/amqp_client.hrl").
+-include("../../deps/amqp_client/include/amqp_client.hrl").
 %% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------

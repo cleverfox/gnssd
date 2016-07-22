@@ -37,7 +37,8 @@ start_link(Ref, Socket, Transport, Opts) ->
 		  recvd_q=[]
 		 }).
 
--include("deps/rabbitmq-erlang-client/include/amqp_client.hrl").
+%-include("deps/rabbitmq-erlang-client/include/amqp_client.hrl").
+-include("../../deps/amqp_client/include/amqp_client.hrl").
 
 %application:set_env(exporter,rabbit_host,"fc00:100::5").
 %
