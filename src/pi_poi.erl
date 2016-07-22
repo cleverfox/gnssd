@@ -6,34 +6,23 @@ separate() -> 0.
 ds_process(PI_Data, Current, Hist, HState) ->  %{private permanent data, public temporary data proplist}
 	ds_process(PI_Data, Current, Hist, HState, []).
 
-ds_process(PI_Data, Current, _Hist, HState, _PI_Params) ->  %{private permanent data, public temporary data proplist}
+ds_process(PI_SRCData, Current, _Hist, HState, _PI_Params) ->  %{private permanent data, public temporary data proplist}
 	{_,[Lon, Lat]}=proplists:lookup(position, Current),
 	{_,T}=proplists:lookup(dt,Current),
-	%SQL="select id from pois where (organisation_id = $3 or organisation_id = 0) and ST_Intersects(geo,st_makepoint($1,$2))",
-	%Time1=now(),
-	%SQLRes=psql:equery(SQL, [Lon,Lat,maps:get(org_id,HState,0)]),
-	%TimeDiff=timer:now_diff(now(),Time1)/1000,
+	{PI_Data,PI_Cache}=case PI_SRCData of
+						   {A,B} when is_list(A) andalso is_map(B) ->
+							   {A,B};
+						   A when is_list(A) ->
+							   {A, #{}};
+						   _ ->
+							   {[],#{}}
+					   end,
 
-	%%lager:info("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]),
-	%if TimeDiff>500 ->
-	%	   lager:error("POI lookup took ~p ~p",[TimeDiff,[Lon,Lat,maps:get(org_id,HState,0)]]);
-	%   true ->
-	%	   ok
-	%end,
-	%POIs=case SQLRes of
-	%		 {ok,_Hdr,Dat} ->
-	%			 [ X || {X} <- Dat ];
-	%		 _Any -> 
-	%			 []
-	%	 end,
 	OLDPois=if is_list(PI_Data) -> PI_Data;
 			   true -> []
 			end,
 
-	POIs=case poi_lookup:lookup(maps:get(org_id,HState,0),Lon,Lat) of
-			 {timeout, _} -> OLDPois;
-			 {ok, List} -> List
-		 end,
+	{POIs, PI_Cache2} = do_lookup(maps:get(org_id,HState,0), Lon, Lat, PI_Cache, OLDPois),
 
 	POIIn=lists:subtract(POIs,OLDPois),
 	POIOut=lists:subtract(OLDPois,POIs),
@@ -56,6 +45,58 @@ ds_process(PI_Data, Current, _Hist, HState, _PI_Params) ->  %{private permanent 
 		_ -> ok
 	end, 
 	
-	{POIs,[{current_poi,POIs},{in_poi,POIIn},{out_poi,POIOut}]}.
+	{{POIs,PI_Cache2},[{current_poi,POIs},{in_poi,POIIn},{out_poi,POIOut}]}.
+
+do_lookup(Org, Lon, Lat, Cache0, OLDPois) ->
+	try 
+	{Cache, Found} = get_cache(Lon, Lat, Cache0),
+	case Found of
+		undefined ->
+			POIs=case poi_lookup:lookup(Org,Lon,Lat) of
+					 {error, _} -> OLDPois;
+					 {timeout, _} -> OLDPois;
+					 {ok, List} -> List
+				 end,
+			{POIs, put_cache(Lon, Lat, POIs, Cache)};
+		POIs ->
+			{POIs, Cache}
+	end
+	catch _Ec:_Ee ->
+			  Stack=erlang:get_stacktrace(),
+			  lager:error("poi_lookup ochen error ~p:~p at ~p",
+						  [_Ec, _Ee, Stack]),
+			  POIs2=case poi_lookup:lookup(Org,Lon,Lat) of
+					   {timeout, _} -> OLDPois;
+					   {ok, List2} -> List2
+				   end,
+			  {POIs2, Cache0}
+	end.
+
+check_hour(Lon, Lat, H, C) ->
+	maps:get({Lon, Lat}, maps:get(H, C, #{}), undefined).
+
+get_cache(Lon, Lat, Cache0) ->
+	H=os:system_time(seconds) div 3600,
+	Cache=maps:filter(
+			fun(CH,_) when CH==H orelse CH==H-1 -> true;
+			   (_,_) -> false
+			end, Cache0),
+	{Cache,
+	 case check_hour(Lon, Lat, H, Cache) of
+		 undefined -> 
+			 check_hour(Lon, Lat, H-1, Cache);
+		 Any -> Any
+	 end
+	}.
+
+put_cache(Lon, Lat, POIs, Cache0) ->
+	H=os:system_time(seconds) div 3600,
+	maps:put(
+	  H, 
+	  maps:put({Lon, Lat}, POIs, 
+			   maps:get(H, Cache0, #{})
+			  ), 
+	  Cache0
+	 ).
 
 

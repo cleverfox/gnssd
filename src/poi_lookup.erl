@@ -55,10 +55,20 @@ init(_Args) ->
 	pg2:join(poi_lookup, self()),
     {ok, #{}}.
 
+handle_call(rate, _From, State) ->
+	L=lists:filter(fun
+					({prev,_}) -> true;
+					({current,_}) -> true;
+					(_) -> false
+				end,maps:to_list(State)),
+	{reply, L, State};
+
 handle_call(status, _From, State) ->
 	L=lists:map(fun
 					({{late,T},C}) ->
 						{<<"Late ",(integer_to_binary(T*10))/binary,"-",(integer_to_binary((T+1)*10))/binary>>,C};
+					({T,C}) when is_atom(T) ->
+						{T,C};
 					({T,C}) ->
 						{<<(integer_to_binary(T*5))/binary,"-",(integer_to_binary((T+1)*5))/binary>>,C}
 				end,maps:to_list(State)),
@@ -68,10 +78,12 @@ handle_call(statusreset, _From, State) ->
 	L=lists:map(fun
 					({{late,T},C}) ->
 						{<<"Late ",(integer_to_binary(T*10))/binary,"-",(integer_to_binary((T+1)*10))/binary>>,C};
+					({T,C}) when is_atom(T) ->
+						{T,C};
 					({T,C}) ->
 						{<<(integer_to_binary(T*5))/binary,"-",(integer_to_binary((T+1)*5))/binary>>,C}
 				end,maps:to_list(State)),
-	{reply, L, #{}};
+	{reply, L, maps:filter(fun(K,_) -> is_atom(K) end, State)};
 
 handle_call({lookup, Org, Lon, Lat, ReqNow, Timeout}, _From, State) ->
 	%lager:info("I ~p, len ~p~n",[self(),erlang:process_info(self(), [message_queue_len])]),
@@ -100,7 +112,18 @@ handle_call({lookup, Org, Lon, Lat, ReqNow, Timeout}, _From, State) ->
 					 _Any -> 
 						 []
 				 end,
-			{reply, {ok,POIs,TimeDiff}, maps:put(TimeCat, maps:get(TimeCat,State,0)+1, State) }
+			CurMin=Time1 div 10000000,
+			State2=maps:put(TimeCat, maps:get(TimeCat,State,0)+1, State),
+			State3=case maps:get(curmin,State2,CurMin) of
+					   CurMin ->
+						   maps:put(current,maps:get(current,State2,0)+1,State2);
+					   _ ->
+						   maps:put(current,1,
+									maps:put(prev, maps:get(current, State2,0), State2)
+								   )
+				   end,
+
+			{reply, {ok,POIs,TimeDiff}, maps:put(curmin,CurMin,State3) }
 	end;
 
 handle_call(_Request, _From, State) ->
