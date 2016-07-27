@@ -130,10 +130,12 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 					mng:ins_update(mongo,<<"events">>, KeyS, {
 														 SKey,{
 														   duration, Now-LStop, 
+														   t, Now, 
 														   fin, 0, 
 														   position, [Lon, Lat], 
 														   c1, 1,
 														   poi, POIs},
+														 <<RKey/binary,".t">>, Now, 
 														 <<RKey/binary,".duration">>, Now-LStart, 
 														 <<RKey/binary,".fin">>, 1, 
 														 <<RKey/binary,".eposition">>, [Lon, Lat]
@@ -145,6 +147,7 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 					savegk(DeviceID, StartH, RKey, eposition, [Lon, Lat]),
 %					lager:info("Geocode ~p in ~p ~p and ~p ~p",[{Lon, Lat}, KeyS, SKey, KeyR, RKey]),
 					mng:ins_update(mongo,<<"events">>, KeyS, {SKey,{
+																t, Now, 
 																duration, Now-LStop, 
 																fin, 0, 
 																position, [Lon, Lat], 
@@ -153,6 +156,7 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 															   }
 															 }),
 					mng:ins_update(mongo,<<"events">>, KeyR, {
+														 <<RKey/binary,".t">>, Now, 
 														 <<RKey/binary,".duration">>, Now-LStart, 
 														 <<RKey/binary,".fin">>, 1, 
 														 <<RKey/binary,".eposition">>, [Lon, Lat]
@@ -170,6 +174,7 @@ savestop(DeviceID, LStop, LStart, Now, Sta, {Lon, Lat, POIs}) ->
 												   <<SKey/binary,".fin">>, 1,
 												   RKey,{
 													 duration, Now-LStart, 
+													 t, Now, 
 													 fin, 0, 
 													 sposition, [Lon, Lat]
 													}

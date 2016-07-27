@@ -85,7 +85,7 @@ init([ID,Hour,Recalc]) ->
 												  }),
 						C;
 					_ -> 
-						lager:error("Can't decode config for device ~p",[ID]),
+						lager:error("Can't decode config for device ~p: ~p",[ID, Settings]),
 						 []
 				end,
 			if Recalc == synccfg ->
@@ -499,6 +499,7 @@ syncrecalc(State, Prepared) ->
 							 end,
 					 prepare_raw4recalc(SortedRaw,State#state.id,State#state.chour,MinTime)
 			 end,
+	mng:delete(mongo,<<"events">>,{type,events,device,State#state.id,hour,State#state.chour}),
 	Res=lists:foldl(fun({Ut,X},St) ->
 						case trunc(Ut/3600)<State#state.chour of
 							true -> 
